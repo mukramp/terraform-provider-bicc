@@ -8,7 +8,7 @@ description: |-
 
 The BICC provider manages [Oracle Business Intelligence Cloud Connector (BICC)](https://docs.oracle.com/en/cloud/saas/applications-common/25d/biacc/index.html) extraction jobs via the BICC REST API.
 
-Use this provider to define and version-control your BICC job configurations as code, including data store selection, incremental extraction settings, column configuration, and backfill management.
+Use this provider to define and version-control your BICC job configurations as code, including data store selection, incremental extraction settings, and column configuration. Backfills are not managed by this provider; do them in the BICC UI.
 
 ## Example Usage
 
@@ -17,7 +17,7 @@ terraform {
   required_providers {
     bicc = {
       source  = "tra-jkv/bicc"
-      version = "~> 2.0"
+      version = "~> 3.0"
     }
   }
 }
