@@ -145,14 +145,16 @@ data_stores = [
 terraform import bicc_job.example 123456789
 ```
 
-After importing, run `terraform plan`. If your config uses `auto_populate_all_columns = true`, the provider will suppress the one-time drift from the import automatically — no apply is needed.
+~> **Known issue:** import currently produces a state with no `data_stores` (the provider drops every data store that is not already in state), so the first `terraform plan` after an import will show the data stores as changes to add. Review that plan before applying. Tracked as KI-2 in the repository's `docs/KNOWN-ISSUES.md`.
+
+After importing, run `terraform plan` and read it carefully.
 
 ## Schema
 
 ### Required
 
 - `name` (String) - Name of the BICC job.
-- `data_stores` (Set of Objects, Min: 1) - Set of data stores to extract (order-independent). See [data_stores](#nested-schema-for-data_stores) below.
+- `data_stores` (Set of Objects) - Set of data stores to extract (order-independent). At least one is expected; the provider does not enforce this. See [data_stores](#nested-schema-for-data_stores) below.
 
 ### Optional
 
@@ -183,7 +185,7 @@ After importing, run `terraform plan`. If your config uses `auto_populate_all_co
 - `chunk_pk_seq_incr` (Number) - Primary key sequence increment for chunking. Default: `0`.
 - `auto_populate_all_columns` (Boolean) - If `true`, automatically fetch and include all available columns from the data store. Use `column_overrides` to mark specific columns (e.g., `LastUpdateDate`) for incremental tracking. Default: `false`.
 - `column_overrides` (List of Objects) - Column overrides applied when `auto_populate_all_columns = true`. Set to `[]` if unused. See [column_overrides](#nested-schema-for-data_storescolumn_overrides) below.
-- `columns` (List of Objects) - Manual column configuration. Use when `auto_populate_all_columns = false`. Set to `[]` if unused. See [columns](#nested-schema-for-data_storescolumns) below.
+- `columns` (Set of Objects) - Manual column configuration. Use when `auto_populate_all_columns = false`. Set to `[]` if unused. See [columns](#nested-schema-for-data_storescolumns) below.
 
 ---
 

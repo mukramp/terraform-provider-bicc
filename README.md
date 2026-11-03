@@ -48,7 +48,7 @@ This means Oracle's built-in scheduling is not viable when you need extracts del
 ## Requirements
 
 - Terraform >= 1.0
-- Go >= 1.21 (for development)
+- Go >= 1.25.5 (for development; see `go.mod`)
 - Oracle Fusion Applications instance with BICC enabled
 
 ## Prerequisites
@@ -72,11 +72,13 @@ go build -o terraform-provider-bicc
 
 3. Install locally for development:
 ```bash
-mkdir -p ~/.terraform.d/plugins/registry.terraform.io/tra-jkv/bicc/2.0.0/darwin_arm64
-cp terraform-provider-bicc ~/.terraform.d/plugins/registry.terraform.io/tra-jkv/bicc/2.0.0/darwin_arm64/
+mkdir -p ~/.terraform.d/plugins/registry.terraform.io/tra-jkv/bicc/3.0.0/darwin_arm64
+cp terraform-provider-bicc ~/.terraform.d/plugins/registry.terraform.io/tra-jkv/bicc/3.0.0/darwin_arm64/
 ```
 
-Note: Adjust the path based on your OS and architecture (darwin_arm64, darwin_amd64, linux_amd64, etc.)
+Note: Adjust the version and the path based on your OS and architecture (darwin_arm64, darwin_amd64, linux_amd64, etc.). The version directory only needs to match the version you pin in `required_providers`.
+
+Alternative without copying files: use a `dev_overrides` block for `tra-jkv/bicc` in `~/.terraformrc` pointing at the directory that holds the built binary.
 
 ## Usage
 
@@ -87,7 +89,7 @@ terraform {
   required_providers {
     bicc = {
       source = "tra-jkv/bicc"
-      version = "~> 2.0"
+      version = "~> 3.0"
     }
   }
 }
@@ -229,7 +231,7 @@ resource "bicc_job" "supplier_incremental" {
       initial_extract_date      = "2025-01-01" # Optional: omit for all historical data
 
       # Optional: Enable chunking for large datasets
-      chunk_type          = "DATE"
+      chunk_type          = "DateSeqIncr" # requires a column with is_creation_date = true
       chunk_date_seq_incr = 7 # Extract in 7-day chunks
 
       columns          = []
@@ -239,149 +241,9 @@ resource "bicc_job" "supplier_incremental" {
 }
 ```
 
-### Backfilling Data (Setting Last Extract Date)
-
-When you need to backfill historical data for an incremental extraction job, use the `bicc_job_backfill` resource to temporarily set a `last_extract_date`. This is a separate resource because the BICC API accepts this field but doesn't persist or return it, which would otherwise cause Terraform drift.
-
-**Key Features:**
-- Uses `data_store_key` (not array index) for robust identification
-- Supports backfilling multiple data stores in a single resource
-- No drift detection - stable state management
-- Easy to add/remove backfills without affecting the main job
-
-**Workflow:**
-1. Create the `bicc_job_backfill` resource with your desired backfill date(s)
-2. Run the BICC job to extract data from that date forward
-3. Destroy the `bicc_job_backfill` resource when backfilling is complete
-
-**Example - Single Data Store:**
-
-```hcl
-# Main incremental job
-resource "bicc_job" "supplier_incremental" {
-  name        = "SupplierIncrementalExtract"
-  description = "Incremental extract for Supplier data"
-
-  data_stores = [
-    {
-      data_store_key             = "FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO"
-      is_silent_error            = true
-      is_effective_date_disabled = false
-      use_union_for_incremental  = true
-      initial_extract_date       = "2025-01-01"
-      auto_populate_all_columns  = true
-      columns                    = []
-
-      column_overrides = [
-        {
-          name                = "LastUpdateDate"
-          is_last_update_date = true # Required for incremental
-        }
-      ]
-    }
-  ]
-}
-
-# Backfill resource - create when needed, destroy when done
-resource "bicc_job_backfill" "supplier_backfill" {
-  job_id = bicc_job.supplier_incremental.id
-
-  backfills = [
-    {
-      data_store_key    = "FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO"
-      last_extract_date = "2024-06-01" # Backfill from this date
-    }
-  ]
-}
-```
-
-**Example - Multiple Data Stores (Billing Orders):**
-
-```hcl
-# Job with multiple related data stores
-resource "bicc_job" "billing_orders" {
-  name        = "BillingOrders"
-  description = "Complete billing order lifecycle"
-
-  data_stores = [
-    # Sales Order Headers
-    {
-      data_store_key             = "FscmTopModelAM.ScmExtractAM.DooBiccExtractAM.HeaderExtractPVO"
-      is_silent_error            = true
-      is_effective_date_disabled = false
-      use_union_for_incremental  = true
-      initial_extract_date       = "2024-01-01"
-      auto_populate_all_columns  = true
-      columns                    = []
-
-      column_overrides = [
-        {
-          name                = "LastUpdateDate"
-          is_last_update_date = true
-        }
-      ]
-    },
-    # Sales Order Lines
-    {
-      data_store_key             = "FscmTopModelAM.ScmExtractAM.DooBiccExtractAM.LineExtractPVO"
-      is_silent_error            = true
-      is_effective_date_disabled = false
-      use_union_for_incremental  = true
-      initial_extract_date       = "2024-01-01"
-      auto_populate_all_columns  = true
-      columns                    = []
-
-      column_overrides = [
-        {
-          name                = "LastUpdateDate"
-          is_last_update_date = true
-        }
-      ]
-    }
-    # Add more related data stores as needed...
-  ]
-}
-
-# Backfill multiple data stores in the job
-resource "bicc_job_backfill" "billing_orders_backfill" {
-  job_id = bicc_job.billing_orders.id
-
-  backfills = [
-    {
-      data_store_key    = "FscmTopModelAM.ScmExtractAM.DooBiccExtractAM.HeaderExtractPVO"
-      last_extract_date = "2023-06-01"
-    },
-    {
-      data_store_key    = "FscmTopModelAM.ScmExtractAM.DooBiccExtractAM.LineExtractPVO"
-      last_extract_date = "2023-06-01"
-    }
-  ]
-}
-```
-
-**To apply backfill:**
-```bash
-terraform apply
-# Run your BICC job via scheduler or ESS API
-```
-
-**To update a backfill date:**
-```bash
-# Just change the date in your config and apply
-terraform apply
-```
-
-**To remove backfill (after job completes):**
-```bash
-terraform destroy -target=bicc_job_backfill.supplier_backfill
-# OR comment out the resource and run: terraform apply
-```
-
-The backfill resource won't cause drift - you can run `terraform plan` multiple times and it will show no changes.
-
 ### Job Scheduling
 
-As described in the [Design](#design-why-terraform-for-jobs-but-external-scheduler-for-execution) section, job execution is triggered externally via the ESS SOAP API. Any scheduler that can make an HTTP request can be used:
+As described in the [Design](#design-scope-of-this-provider) section, job execution is triggered externally via the ESS SOAP API. Any scheduler that can make an HTTP request can be used:
 
 - GCP Cloud Scheduler
 - AWS EventBridge
@@ -404,10 +266,24 @@ go build -o terraform-provider-bicc
 ### Testing
 
 ```bash
-go test ./...
+go vet ./...
+go test ./... -count=1
 ```
 
+These are the same build and test steps CI runs on pull requests (`.github/workflows/ci.yml`: `go build ./...`, `go test ./... -v -count=1`). There are no acceptance tests yet (`TF_ACC`), and nothing runs against a live BICC instance automatically.
+
+### Trying the provider locally against a BICC instance
+
+Build the provider, point `dev_overrides` at it and run Terraform from a scratch directory with local state. This writes to the BICC instance you configure, so use a non-production instance and throwaway job names. Credentials come from `BICC_HOST`, `BICC_USERNAME` and `BICC_PASSWORD`; the provider block can then be empty (`provider "bicc" {}`). Run `terraform plan` and read it before `terraform apply`; `terraform destroy` removes the jobs the scratch state created.
+
+### Project documentation
+
+Roadmap, known issues, open assumptions and decisions are in `docs/`; start with [AGENTS.md](AGENTS.md). Release process: tag `vX.Y.Z` on `main`; the release workflow runs GoReleaser (signed multi-platform zips for the Terraform Registry).
+
 ### Running Examples
+
+> **Warning:** `examples/main.tf` uses the old v1 block syntax (`data_stores { ... }`) and does not validate against the current schema, and it still contains commented-out backfill examples. See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) (KI-10). For working syntax use the examples above in this README or [docs/resources/job.md](docs/resources/job.md).
+
 
 ```bash
 cd examples
@@ -429,6 +305,10 @@ For job execution (handled separately):
 ## Limitations
 
 - Job scheduling must be handled externally (e.g., GCP Cloud Scheduler, AWS EventBridge, cron, etc.)
+- Backfills (setting a last extract date) are not supported by the BICC REST API and are not managed by Terraform. Do them in the BICC UI. The `bicc_job_backfill` resource was removed in v3.0.0.
+- Deleting a `bicc_job` (or removing it from your configuration) deletes the BICC job, including its last-extract-date state. A rename is a delete plus create in practice, see [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) (KI-3).
+- Importing an existing job (`terraform import`) currently produces a state without data stores, so do not rely on "import, then plan shows no changes" yet (KI-2).
+- Other known problems, with evidence, are listed in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md). No automated test runs against a live BICC instance, and several BICC API behaviours are unverified; see [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md).
 
 ## Contributing
 
