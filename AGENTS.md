@@ -32,6 +32,8 @@ Facts about this repo: it is PR-based (7 merged PRs, branches `fix/…`, `docs/�
 
 Commit authority: commit your own finished, verified changes by explicit path (never `git add .`, `-A` or `commit -a`), on a feature branch named for the work (`fix/…`, `docs/…`, `feat/…`; there are no ticket IDs yet), then push and open a PR. Never commit to `main`. Never commit `.env`, secrets, built binaries (`terraform-provider-bicc` in the root is git-ignored) or `dist/`. If a file you changed also has someone else's uncommitted edits, do not commit that file; report it.
 
+Remotes: `origin` is the upstream, `tra-jkv/terraform-provider-bicc` (Tra Nguyen's work; read-only for us). `mukramp` is the fork, `mukramp/terraform-provider-bicc`, created 2026-11-03; push feature branches there and open PRs against the fork's `main`. Never push to `origin`. The fork starts from upstream `3e25a02` (v3.0.0) plus the branch `docs/self-documenting-repo`. Whether and how work goes back upstream, and which registry address and distribution the project ends up with, is open (Q2): do not change `Address` in `main.go`, the module path, or release config in the fork until Q2 is answered. The fork's GitHub Actions secrets (`GPG_PRIVATE_KEY`, `PASSPHRASE`) are not set (observed 2026-11-03: `gh secret list` on the fork returned nothing), so `release.yml` cannot produce signed releases there. GitHub Actions is enabled on the fork (observed), so CI runs on PRs there.
+
 Merge authority: **owner only** until the owner says otherwise (proposed default, Decision Inbox D1). Release and deploy are authorized separately and are owner-only (red lane).
 
 ### Decision rights
@@ -112,21 +114,23 @@ Sibling directories outside this repo (separate repos, not editable from here wi
 
 - BICC: `BICC_HOST`, `BICC_USERNAME`, `BICC_PASSWORD` environment variables (the provider block can be empty). Locally they live in `../sit_testing/.env` (git-ignored, never read or print it; agents cannot read `.env`). In the consumer pipeline they come from secret injection; the secret names are in the consumer repo (reported, not checked).
 - Release signing: GitHub Actions secrets `GPG_PRIVATE_KEY` and `PASSPHRASE` (names from `release.yml`). Never in the repo.
-- GitHub: repo `tra-jkv/terraform-provider-bicc`; use the `gh` CLI. Whether the logged-in account may push here is not verified.
+- GitHub: use the `gh` CLI, logged in as `mukramp`. That account cannot push to `tra-jkv/terraform-provider-bicc` (HTTP 403, observed 2026-11-03), so it works in its own fork; see "Remotes" in section 4.
 - Terraform GCS backend of the consumer repo: reachable only from its pipelines, not from a developer machine (DR-4).
 
 ## 10. Key people
 
 | Who | Role | Evidence |
 |---|---|---|
-| Tra Nguyen (GitHub `tra-jkv`) | Author of all commits and the repo owner; owner-only decisions go here | `git log`, README "Author"; ownership of decisions is inferred, confirm |
+| Tra Nguyen (GitHub `tra-jkv`) | Author of all upstream commits and owner of the upstream repo and its registry listing | `git log`, README "Author" |
+| `mukramp` (GitHub account used by the `gh` CLI here) | Owner of the fork, which continues from Tra Nguyen's work; owner-only decisions for the fork go here | fork created 2026-11-03 at the user's request; confirm whether this account speaks for the team |
 | Owner of `bicc-job-tf` and of the Terraform pipeline image | Unknown, not established (Q2) | PLAN/DECISIONS |
 
 ## 11. Key links
 
 | What | Link |
 |---|---|
-| Repo | https://github.com/tra-jkv/terraform-provider-bicc |
+| Upstream repo | https://github.com/tra-jkv/terraform-provider-bicc |
+| Fork (our working repo) | https://github.com/mukramp/terraform-provider-bicc |
 | Registry page | https://registry.terraform.io/providers/tra-jkv/bicc/latest |
 | BICC docs | https://docs.oracle.com/en/cloud/saas/applications-common/25d/biacc/index.html |
 | BICC REST API | https://docs.oracle.com/en/cloud/saas/applications-common/25d/biacc/manage-meta-data-rest-api1-vo-attributes-for-sdm-vo-and-non-sdm.html |
