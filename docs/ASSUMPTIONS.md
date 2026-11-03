@@ -27,7 +27,7 @@ No live check below has been run. Until the rows that block a task are `verified
 |---|---|---|---|---|
 | A1 | PUT an existing job with a changed `name`: new job (new ID) or old job updated with the name ignored? | Task 3. The earlier plan assumed "new job", the code assumes "ignored". | unknown | none |
 | A2 | Which `status` values does PUT return for success, success with warning, failure (for example an invalid column or data store key)? How does `cmd_apply` in the CLI treat each? | Task 4 | unknown | none |
-| A3 | Does `GET` on the jobs list return job IDs? | Task 9 (import-by-name). The CLI code reads `id` from the list response (`bicc-job-cli/bicc/client.py`), which suggests yes. | inferred | CLI code read 2026-11-03; live API not called |
+| A3 | Does `GET` on the jobs list return job IDs? | Task 9 (import-by-name). The CLI code reads `id` from the list response (`bicc-job-cli/bicc/client.py`), which suggests yes. | observed: **no** | 2026-11-03, read-only `GET /biacm/rest/meta/jobs/` on the instance behind secret `bicc-host-sit`: HTTP 200, 37 jobs, none has an `id` key; keys are `dataStores`, `description`, `name`, `schedules`. Import-by-name through the list API is not possible; the CLI inference was wrong. |
 | A4 | Does PUT tell you whether it created or updated? | Messages and plan accuracy | unknown | none |
 | A5 | DELETE on an existing job, then DELETE again (404?), then GET after delete. | Task 5 typed-404 handling. A client comment says the API "may not support DELETE" (`bicc/client/jobs.go:207`); the CLI's `cmd_delete` uses it. DR-1 relies on deletion working. | unknown | none |
 | A6 | GET on a missing job: status code and body. | Task 5: tell a real 404 from other errors | unknown | none |
@@ -42,7 +42,7 @@ No live check below has been run. Until the rows that block a task are `verified
 | B2 | Apply with `auto_populate_all_columns = true` on a PVO with more than 1000 columns. Does the ORA-00028 / ORA-01792 issue appear on apply? | unknown | none (the code comment in `bicc/resource_job.go` says default selection avoids ORA-01792; not re-tested) |
 | B3 | Plan twice in a row with no changes; the second plan must be empty. | unknown | none |
 | B4 | Rename, then destroy, on a throwaway job. | unknown | none |
-| B5 | `terraform plan` with an empty `provider "bicc" {}` block and credentials only in `BICC_*` env vars (task 1). Run via `sit_testing`, `make plan`. | unknown | none |
+| B5 | `terraform plan` with an empty `provider "bicc" {}` block and credentials only in `BICC_*` env vars (task 1). Run via `sit_testing`, `make plan`. | partly verified | 2026-11-03: `make init` and `make plan` with the empty block and `BICC_*` from env: no validation error, plan = 1 create (`bicc_job.sit_test_job`), 0 change, 0 destroy. Credentials were also loaded from Secret Manager into a temporary env file (deleted afterwards) and the plan was the same. **Apply not verified**: the first `make apply` failed with HTTP 403 `Blocked: PUT to non-whitelisted domain` for the host in the secret (a `...-dev3.fa.em2.oraclecloud.com` host); a before/after list of all 37 jobs (name plus content hash) showed no change. |
 
 ## C. Terraform pipeline behaviour (Q5 in [DECISIONS.md](DECISIONS.md); see also [CONSUMER-MIGRATION.md](CONSUMER-MIGRATION.md))
 
