@@ -9,7 +9,7 @@ Evidence labels used in this repo: `observed` (checked directly on the date give
 
 ## Context
 
-The provider (`bicc_job` resource, Terraform plugin framework, protocol 5) exists and is released up to v3.0.0. The remaining work is hardening it, distributing it, and migrating a consuming repo (`bicc-job-tf`, a sibling repo, see [CONSUMER-MIGRATION.md](CONSUMER-MIGRATION.md)) from the Python CLI (`bicc-job-cli`) to it.
+The provider (`bicc_job` resource, Terraform plugin framework; served protocol 6 by default (not confirmed by running the binary), the registry manifest declares 5.0, see Q12 in [DECISIONS.md](DECISIONS.md)) exists and is released up to v3.0.0. The remaining work is hardening it, distributing it, and migrating a consuming repo (`bicc-job-tf`, a sibling repo, see [CONSUMER-MIGRATION.md](CONSUMER-MIGRATION.md)) from the Python CLI (`bicc-job-cli`) to it.
 Reference behaviour is the CLI. Mapping of CLI pieces to provider code (reported, from the old plan):
 
 | CLI piece | Provider equivalent |

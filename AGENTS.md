@@ -4,7 +4,7 @@ Read this file first. Last updated: 2026-11-03. If anything here contradicts the
 
 ## 1. What this repo is
 
-A Terraform provider (Go, `terraform-plugin-framework`, protocol 5) that manages Oracle BICC (Business Intelligence Cloud Connector) extraction jobs through the BICC REST API. One resource, `bicc_job`. Module `github.com/tra-jkv/terraform-provider-bicc`, registry address `tra-jkv/bicc`, public GitHub repo. Artifacts: the provider binary, signed multi-platform release zips (GoReleaser, on `v*` tags), and Terraform Registry docs in `docs/`. Job execution and scheduling are deliberately not part of it (DR-6).
+A Terraform provider (Go, `terraform-plugin-framework`; serves protocol 6 by default, the registry manifest says 5.0, see Q12) that manages Oracle BICC (Business Intelligence Cloud Connector) extraction jobs through the BICC REST API. One resource, `bicc_job`. Module `github.com/tra-jkv/terraform-provider-bicc`, registry address `tra-jkv/bicc`, public GitHub repo. Artifacts: the provider binary, signed multi-platform release zips (GoReleaser, on `v*` tags), and Terraform Registry docs in `docs/`. Job execution and scheduling are deliberately not part of it (DR-6).
 
 ## 2. Why it exists
 
