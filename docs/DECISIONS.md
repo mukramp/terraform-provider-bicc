@@ -102,6 +102,7 @@ Options from the old plan:
 
 ### Q13. Schema `Default` values on `columns` may make the plan after import invalid
 - Found by the task 2 provider-server test (branch `fix/import-data-stores`, test header in `bicc/resource_job_providerserver_test.go`): when the framework applies the `Default` values of the `columns` attributes to a proposed element that differs from the config element, a configured `is_primary_key = true` can be planned as `false`. With the defaults removed in a scratch copy the plan equalled the prior state. Whether Terraform core does the same (it would report "Provider produced invalid plan" and refuse to apply) is unverified: it needs a real `terraform import` plus `plan` (check B1).
+- Not ruled out: a plan that core accepts but that carries the overwritten flag into `Update`, which would send a changed `columns` flag to BICC. "The apply refuses" is the likely outcome, not a proven one.
 - Fixing it is a schema change (yellow lane at least, possibly a breaking change: major version). Not started.
 - Options: A. Run B1 on `SIT_TEST_JOB` first and decide with the result (recommended). B. Change the schema now. 
 - Default if unanswered: A. Reversible: yes.
