@@ -396,7 +396,7 @@ func TestImportFailuresLeaveNoState(t *testing.T) {
 		body   string
 		want   string
 	}{
-		{"missing job (400 Invalid Job Id, live shape)", http.StatusBadRequest, liveMissingJobBody, "does not exist"},
+		{"missing job (400 Invalid Job Id, live shape)", http.StatusBadRequest, liveMissingJobBody, "does not exist or is not visible to this account"},
 		{"500", http.StatusInternalServerError, `boom`, "boom"},
 		{"bare 404", http.StatusNotFound, `Not Found`, "404"},
 		{"401", http.StatusUnauthorized, ``, "401"},

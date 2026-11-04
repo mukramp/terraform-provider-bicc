@@ -505,8 +505,8 @@ func (r *biccJobResource) ImportState(ctx context.Context, req resource.ImportSt
 	if err != nil {
 		if client.IsNotFound(err) {
 			resp.Diagnostics.AddError(
-				"Job to import does not exist",
-				fmt.Sprintf("BICC reports that job %d does not exist (HTTP 400 \"Invalid Job Id provided\"). Nothing was imported. Check the ID and the BICC instance (host) the provider is configured for.", jobID),
+				"Job to import does not exist or is not visible",
+				fmt.Sprintf("Job %d does not exist or is not visible to this account (BICC answers HTTP 400 \"Invalid Job Id provided\" in both cases as far as observed; the second case is unchecked, ASSUMPTIONS A6). Nothing was imported. Check the ID, the BICC instance (host) and the account the provider is configured for.", jobID),
 			)
 			return
 		}
