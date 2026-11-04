@@ -450,32 +450,58 @@ func (r *biccJobResource) Delete(ctx context.Context, req resource.DeleteRequest
 	}
 }
 
+// ImportState imports a job by its numeric BICC id (PLAN task 2, KI-2).
+//
+// Import is decided HERE, by being the import entry point, and not inferred in Read from
+// "state has no data stores". Read cannot tell an import from a job whose config has
+// data_stores = [], and for the latter it must keep filtering the API's phantom stores
+// (KI-8). So ImportState keeps ALL API data stores (importAll) and writes them to state;
+// the Read that Terraform runs right after import then sees them in state and filters
+// against them, which keeps all of them.
+//
+// Imported data stores use explicit-column mode: auto_populate_all_columns = false,
+// column_overrides = [], and columns taken from the API. That way the state carries what
+// BICC has, and the first plan does not need an apply-time column lookup. A config that
+// says auto_populate_all_columns = true differs from this state by design (see
+// docs/resources/job.md, "Importing Existing Jobs").
+//
+// The id is validated before any API call: it must be a positive decimal integer. The
+// state is written only at the very end, so any failure leaves nothing in state.
 func (r *biccJobResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	var state biccJobModel
-	state.ID = types.StringValue(req.ID)
-
 	jobID, err := strconv.ParseInt(req.ID, 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid import ID", "Expected a numeric job ID.")
+	if err != nil || jobID <= 0 {
+		resp.Diagnostics.AddError(
+			"Invalid import ID",
+			fmt.Sprintf("Expected the numeric BICC job ID as a positive integer, got %q.", req.ID),
+		)
 		return
 	}
 
 	job, err := r.client.GetJob(ctx, jobID)
 	if err != nil {
-		resp.Diagnostics.AddError("Error reading job during import", err.Error())
+		if client.IsNotFound(err) {
+			resp.Diagnostics.AddError(
+				"Job to import does not exist",
+				fmt.Sprintf("BICC reports that job %d does not exist (HTTP 400 \"Invalid Job Id provided\"). Nothing was imported. Check the ID and the BICC instance (host) the provider is configured for.", jobID),
+			)
+			return
+		}
+		resp.Diagnostics.AddError("Error reading job during import", fmt.Sprintf("Could not read job %d; nothing was imported: %s", jobID, err))
 		return
 	}
 
-	state.Name = types.StringValue(job.Name)
-	state.Description = types.StringValue(job.Description)
-
-	newDataStores, diags := r.buildDataStoresFromAPI(ctx, job.DataStores, map[string]dataStoreModel{})
+	newDataStores, diags := r.buildDataStoresFromAPIMode(ctx, job.DataStores, map[string]dataStoreModel{}, true)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	state.DataStores = newDataStores
 
+	state := biccJobModel{
+		ID:          types.StringValue(strconv.FormatInt(jobID, 10)),
+		Name:        types.StringValue(job.Name),
+		Description: types.StringValue(job.Description),
+		DataStores:  newDataStores,
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
@@ -874,22 +900,37 @@ func buildOldDataStoreMap(ctx context.Context, set types.Set) (map[string]dataSt
 	return result, diags
 }
 
-// buildDataStoresFromAPI converts API data stores into a types.Set.
-// Config-only fields (auto_populate_all_columns, column_overrides) are carried
-// forward from oldByKey since the API does not return them.
+// buildDataStoresFromAPI converts API data stores into a types.Set for Create, Read and
+// Update. Config-only fields (auto_populate_all_columns, column_overrides) are carried
+// forward from oldByKey since the API does not return them, and only data stores present
+// in oldByKey are kept (see buildDataStoresFromAPIMode).
 func (r *biccJobResource) buildDataStoresFromAPI(ctx context.Context, apiDS []client.DataStore, oldByKey map[string]dataStoreModel) (types.Set, diag.Diagnostics) {
+	return r.buildDataStoresFromAPIMode(ctx, apiDS, oldByKey, false)
+}
+
+// buildDataStoresFromAPIMode is buildDataStoresFromAPI with an explicit import switch.
+//
+// importAll == false (Create, Read, Update): only data stores present in oldByKey are
+// kept. The BICC API may silently re-add data stores that were removed (KI-8, commit
+// 54a364a; API behaviour unverified, ASSUMPTIONS A7), so state follows config/state, not
+// the API. An EMPTY oldByKey therefore yields no data stores: that is the correct answer
+// for data_stores = [] and must not be mistaken for an import.
+//
+// importAll == true (ImportState only): there is no prior state, so every API data store
+// is kept, in explicit-column mode (auto_populate_all_columns = false) with the columns
+// the API returned.
+func (r *biccJobResource) buildDataStoresFromAPIMode(ctx context.Context, apiDS []client.DataStore, oldByKey map[string]dataStoreModel, importAll bool) (types.Set, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
-	// Only include data stores that are present in the config (oldByKey).
-	// The BICC API may silently re-add data stores that were removed — we must
-	// filter them out here so state stays in sync with config, not with the API.
-	filtered := make([]client.DataStore, 0, len(apiDS))
-	for _, ds := range apiDS {
-		if _, exists := oldByKey[ds.DataStoreMeta.DataStoreKey]; exists {
-			filtered = append(filtered, ds)
+	if !importAll {
+		filtered := make([]client.DataStore, 0, len(apiDS))
+		for _, ds := range apiDS {
+			if _, exists := oldByKey[ds.DataStoreMeta.DataStoreKey]; exists {
+				filtered = append(filtered, ds)
+			}
 		}
+		apiDS = filtered
 	}
-	apiDS = filtered
 
 	dsObjects := make([]attr.Value, len(apiDS))
 
@@ -929,7 +970,7 @@ func (r *biccJobResource) buildDataStoresFromAPI(ctx context.Context, apiDS []cl
 		// Also skip building columns when prior state already had an empty column set:
 		// this avoids the O(n) types.SetValue hashing cost for large-column PVOs (e.g.
 		// AR jobs with 900+ columns) where ModifyPlan will discard the list anyway.
-		oldHadColumns := false
+		oldHadColumns := importAll // import: no prior state, take the API columns
 		if old, exists := oldByKey[key]; exists {
 			oldHadColumns = !isSetEmpty(old.Columns)
 		}
