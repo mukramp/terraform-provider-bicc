@@ -581,3 +581,40 @@ func TestOrphanProcessingDetailWording(t *testing.T) {
 		}
 	}
 }
+
+// M-4: Update must validate the state id BEFORE any HTTP call. Same ids as
+// TestReadDeleteRejectUnusableStateIDs. If the mock were reached it would answer PUT 200
+// with an id and GET with the live "missing" 400.
+func TestUpdateRejectsUnusableStateIDs(t *testing.T) {
+	for _, id := range []string{"", "abc", "99999999999999999999", " 4242", "0", "-5"} {
+		id := id
+		t.Run("Update id="+strconv.Quote(id), func(t *testing.T) {
+			r, calls := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodPut {
+					_, _ = w.Write([]byte(`{"status":"success","id":"555"}`))
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(liveMissingJobBody))
+			})
+			state := stateWithID(t, id)
+			createReq, _ := newCreateReq(t)
+			resp := &resource.UpdateResponse{State: tfsdk.State{Schema: state.Schema, Raw: state.Raw.Copy()}}
+			r.Update(context.Background(), resource.UpdateRequest{Plan: tfsdk.Plan{Schema: createReq.Plan.Schema, Raw: createReq.Plan.Raw}, State: state}, resp)
+
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if resp.State.Raw.IsNull() {
+				t.Fatal("state was removed for an unusable id")
+			}
+			var m biccJobModel
+			if diags := resp.State.Get(context.Background(), &m); diags.HasError() || m.ID.ValueString() != id || m.Description.ValueString() != "old description" {
+				t.Errorf("state was modified: %+v %v", m, diags)
+			}
+			if got := atomic.LoadInt32(calls); got != 0 {
+				t.Errorf("expected 0 HTTP calls, got %d", got)
+			}
+		})
+	}
+}

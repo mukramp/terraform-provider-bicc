@@ -446,6 +446,13 @@ func (r *biccJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 	plan.ID = state.ID
 
+	// Validate the state id BEFORE any HTTP call (the PUT upserts by name and cannot be
+	// undone, and a bad id would only fail after it): same rule as Read and Delete (KI-5).
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
+		return
+	}
+
 	job, diags := r.buildJobFromModel(ctx, plan)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
@@ -459,12 +466,6 @@ func (r *biccJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	// Re-read from the API so state reflects server-normalized values.
-	jobID, err := strconv.ParseInt(plan.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID after update", err.Error())
-		return
-	}
-
 	refreshed, err := r.client.GetJob(ctx, jobID)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading job after update", err.Error())
