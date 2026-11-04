@@ -94,6 +94,18 @@ Options from the old plan:
 - Options: A. Leave it (default). B. Make the timeout configurable or raise it for PUT and DELETE only (separate yellow-lane change).
 - Default if unanswered: A.
 
+### Q12. The provider serves protocol 6, the registry manifest and our docs say protocol 5. Fix it?
+- Observed 2026-11-04: `main.go` calls `providerserver.Serve` without `ProtocolVersion`; terraform-plugin-framework v1.19.0 documents "Defaults to protocol version 6" (`providerserver/serve_opts.go`), and the schema uses nested attributes, which protocol 5 cannot serialise (the task 2 builder saw `GetProviderSchema` fail on protocol 5). `terraform-registry-manifest.json` declares `["5.0"]`; `AGENTS.md` and `docs/PLAN.md` say "protocol 5". The binary was not run to confirm the served version.
+- Likely effect: the registry would list the provider as compatible with Terraform versions that cannot talk protocol 6 (Terraform before 1.0). Unverified; v3.0.0 is downloaded and used from the public registry today.
+- Options: A. Set the manifest to `["6.0"]` and fix the docs in a release-config change (red lane: owner approves, takes effect with the next release; recommended). B. Leave it until Q2 (distribution) is decided.
+- Default if unanswered: B; docs wording corrected only. Reversible: yes.
+
+### Q13. Schema `Default` values on `columns` may make the plan after import invalid
+- Found by the task 2 provider-server test (branch `fix/import-data-stores`, test header in `bicc/resource_job_providerserver_test.go`): when the framework applies the `Default` values of the `columns` attributes to a proposed element that differs from the config element, a configured `is_primary_key = true` can be planned as `false`. With the defaults removed in a scratch copy the plan equalled the prior state. Whether Terraform core does the same (it would report "Provider produced invalid plan" and refuse to apply) is unverified: it needs a real `terraform import` plus `plan` (check B1).
+- Fixing it is a schema change (yellow lane at least, possibly a breaking change: major version). Not started.
+- Options: A. Run B1 on `SIT_TEST_JOB` first and decide with the result (recommended). B. Change the schema now. 
+- Default if unanswered: A. Reversible: yes.
+
 ## Resolved
 
 - Q1. Does a Go provider prototype exist? Yes: this provider.
