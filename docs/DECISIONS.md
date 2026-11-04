@@ -71,6 +71,28 @@ Options from the old plan:
 ### Q7. Commit and release of the pending task 1 change
 - The task 1 edits (`bicc/provider.go`, `bicc/provider_test.go`, plus doc hunks) were made earlier and are uncommitted. This migration does not commit them without a statement from the owner that they are finished. See `AGENTS.md`, authority.
 - Update 2026-11-03: owner: **the change still has to be verified through `../sit_testing`** (its Makefile loads `.env` for the Terraform commands) before it is committed. That is check B5 in [ASSUMPTIONS.md](ASSUMPTIONS.md). Release stays red lane and owner-only.
+- Update 2026-11-04: B5 verified on SIT (create, no-diff plan, destroy; see ASSUMPTIONS B3, B5, A5). The change is committed on branch `feat/env-credentials` in the fork (`git log` has the commit). Not merged, not released.
+
+### Q8. Should a successful column lookup that leaves zero populated columns fail the apply? OPEN (task 6)
+- Today the provider would PUT such a data store with zero columns. Task 6 turns that into an error (recommended default, not owner-confirmed).
+- Evidence: on SIT none of the 145 data store keys in use would hit the error (ASSUMPTIONS A11; SIT only; whether `column_overrides` that deselect everything occur is not covered). Nothing shows what BICC does with a job PUT with zero columns.
+- Options: A. Fail the apply (recommended: it avoids sending a job with no columns, which can damage a production job without any error). B. Send the job as before.
+- Default if unanswered: A, as implemented on the branch. Reversible: yes, one block in `buildJobFromModel`.
+
+### Q9. KI-12: auto-populate column selection, change the code or the doc?
+- The doc (`docs/resources/job.md`) says auto mode includes all available columns. The code keeps only `isPopulate || isPrimaryKey` columns, then drops columns that end up not populated (a primary key with `isPopulate=false` is dropped unless an override sets it back). An override with `is_populate=true` on a non-default column has no effect, unlike the CLI's `resolve_columns` (read in `bicc-job-cli/bicc/payload.py`, not run).
+- Options: A. Change the doc to match the code (recommended, no behaviour change). B. Change the code to match the CLI. Needs live checks first (ORA-01792 with more than 1000 columns, B2).
+- Default if unanswered: A. Reversible: yes. Pinned by a test, `TestBuildJob_PreExisting_PrimaryKeyWithIsPopulateFalse`, on the task 6 branch.
+
+### Q10. Do jobs that the account cannot see return the same HTTP 400 `Invalid Job Id provided` as missing jobs?
+- Task 5 treats that 400 as "job does not exist" and drops it from state (ASSUMPTIONS A6). If a job the account cannot see returns the same 400, a permission change would make Read drop those jobs and the next plan would recreate them.
+- Cannot be checked safely from here (needs a second account or a job the SIT account cannot read). Options: A. Owner checks it or knows the answer before any prd use (recommended). B. Accept the risk for sit, check before stg.
+- Default if unanswered: no prd use until answered.
+
+### Q11. Raise the HTTP client timeout for PUT and DELETE?
+- Observed deletes take about 150s and one create 28s against a fixed 300s timeout (ASSUMPTIONS A10). If the timeout fires after BICC deleted the job, the next run recovers cleanly with the task 5 predicate.
+- Options: A. Leave it (default). B. Make the timeout configurable or raise it for PUT and DELETE only (separate yellow-lane change).
+- Default if unanswered: A.
 
 ## Resolved
 
