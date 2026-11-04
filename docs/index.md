@@ -43,12 +43,11 @@ Credentials can be supplied via provider arguments or environment variables:
 
 ## Schema
 
-### Required
-
-- `host` (String) - The Oracle Fusion Applications hostname (e.g., `yourinstance.fa.us2.oraclecloud.com`).
-- `username` (String) - Username for BICC authentication.
-- `password` (String, Sensitive) - Password for BICC authentication.
-
 ### Optional
 
+`host`, `username` and `password` must each be set either in the provider block or through the matching environment variable. The provider block takes precedence. If neither is set, the provider fails with a "Missing ..." error.
+
+- `host` (String) - The Oracle Fusion Applications hostname (e.g., `yourinstance.fa.us2.oraclecloud.com`). Env: `BICC_HOST`.
+- `username` (String) - Username for BICC authentication. Env: `BICC_USERNAME`.
+- `password` (String, Sensitive) - Password for BICC authentication. Env: `BICC_PASSWORD`.
 - `port` (Number) - Port for the BICC API. Defaults to `443`.

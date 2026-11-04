@@ -102,7 +102,7 @@ provider "bicc" {
 }
 ```
 
-You can also use environment variables:
+You can also use environment variables and omit the corresponding arguments from the `provider` block (config takes precedence when both are set):
 ```bash
 export BICC_HOST="servername.fa.us2.oraclecloud.com"
 export BICC_USERNAME="your-username"
