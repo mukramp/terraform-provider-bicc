@@ -408,6 +408,99 @@ func TestGetDataStoreColumns(t *testing.T) {
 	})
 }
 
+// A9 (observed 2026-11-03, live SIT, read-only): a data store key that does not
+// exist returns HTTP 500 with a JSON body whose "code" is "Internal Server
+// Error", not 404. Only the status and that code were observed; the "message"
+// text below is invented for the test and is deliberately not asserted on.
+// The error must carry the status and the body, and 500 must not be treated as
+// "not found".
+func TestGetDataStoreColumns_Error500IncludesStatusAndBody(t *testing.T) {
+	const body = `{"code":"Internal Server Error","message":"synthetic test message"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	cols, err := c.GetDataStoreColumns(context.Background(), "FscmTopModelAM.Nope.DoesNotExistPVO")
+	if err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+	if cols != nil {
+		t.Errorf("expected nil columns on error, got %+v", cols)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "500") {
+		t.Errorf("error should include the status code, got: %s", msg)
+	}
+	if !strings.Contains(msg, "Internal Server Error") {
+		t.Errorf("error should include the response body (code), got: %s", msg)
+	}
+}
+
+// The key is part of the URL path and must be escaped (KI-6, A8 unverified on
+// the live API; escaping is standard URL hygiene). A normal key is unchanged.
+func TestGetDataStoreColumns_PathEscaping(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		wantURI string
+	}{
+		{
+			name:    "normal key unchanged on the wire",
+			key:     "HcmTopModelAnalyticsGlobalAM.HcmProfileCoreAM.CountryPVO",
+			wantURI: "/biacm/rest/meta/datastores/HcmTopModelAnalyticsGlobalAM.HcmProfileCoreAM.CountryPVO",
+		},
+		{
+			// Not a PathEscape discriminator: net/http escapes a space itself, so
+			// this passes with or without url.PathEscape. Kept as a wire-format check.
+			name:    "space on the wire (passes without PathEscape too)",
+			key:     "My DS.Key",
+			wantURI: "/biacm/rest/meta/datastores/My%20DS.Key",
+		},
+		{
+			name:    "percent sign is escaped, not decoded",
+			key:     "A%41.Key",
+			wantURI: "/biacm/rest/meta/datastores/A%2541.Key",
+		},
+		{
+			name:    "slash is escaped, not a path separator",
+			key:     "A/B.Key",
+			wantURI: "/biacm/rest/meta/datastores/A%2FB.Key",
+		},
+		{
+			name:    "query and fragment characters are escaped",
+			key:     "A?x=1#frag",
+			wantURI: "/biacm/rest/meta/datastores/A%3Fx=1%23frag",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotURI, gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotURI = r.RequestURI // raw request target as sent on the wire
+				gotQuery = r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"columns":[{"name":"C","isPopulate":true}]}`))
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv)
+			if _, err := c.GetDataStoreColumns(context.Background(), tc.key); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gotURI != tc.wantURI {
+				t.Errorf("request URI: got %q, want %q", gotURI, tc.wantURI)
+			}
+			if gotQuery != "" {
+				t.Errorf("key leaked into the query string: %q", gotQuery)
+			}
+		})
+	}
+}
+
 // -------------------------------------------------------------------------
 // DeleteJob — HTTP behaviour
 // -------------------------------------------------------------------------

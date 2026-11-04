@@ -879,7 +879,15 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 			result := prefetch[ds.DataStoreKey.ValueString()]
 			allCols, err := result.cols, result.err
 			if err != nil {
-				columns = []client.Column{}
+				// Never fall back to zero columns: that would PUT a job with an
+				// empty column list (KI-6). BICC reports a missing key as HTTP
+				// 500 (ASSUMPTIONS A9); the client error carries status and body.
+				diags.AddError(
+					"Error looking up columns for data store",
+					fmt.Sprintf("Could not fetch the column metadata for data_store_key %q (auto_populate_all_columns = true), so the job was not sent to BICC: %s",
+						ds.DataStoreKey.ValueString(), err),
+				)
+				continue
 			} else {
 				// Use only BICC's default-selected columns (isPopulate=true in meta),
 				// matching the BICC UI default selection behaviour. This avoids
@@ -900,8 +908,12 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 				}
 
 				var overrides []columnOverrideModel
-				diags.Append(ds.ColumnOverrides.ElementsAs(ctx, &overrides, false)...)
-				if diags.HasError() {
+				// Check this call's own diagnostics: diags may already hold an
+				// earlier store's lookup error, and that must not abort the loop
+				// (all failing stores are reported).
+				d := ds.ColumnOverrides.ElementsAs(ctx, &overrides, false)
+				diags.Append(d...)
+				if d.HasError() {
 					return nil, diags
 				}
 				overrideMap := make(map[string]columnOverrideModel, len(overrides))
@@ -938,11 +950,23 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 					}
 				}
 				columns = kept
+
+				// A lookup that succeeds but leaves no columns would also PUT a
+				// job without columns. Treat it as an error as well.
+				if len(columns) == 0 {
+					diags.AddError(
+						"No columns selected for data store",
+						fmt.Sprintf("data_store_key %q has auto_populate_all_columns = true, but no column remains populated after the lookup and column_overrides (BICC returned %d columns). The job was not sent to BICC.",
+							ds.DataStoreKey.ValueString(), len(allCols)),
+					)
+					continue
+				}
 			}
 		} else {
 			var colModels []columnModel
-			diags.Append(ds.Columns.ElementsAs(ctx, &colModels, false)...)
-			if diags.HasError() {
+			d := ds.Columns.ElementsAs(ctx, &colModels, false)
+			diags.Append(d...)
+			if d.HasError() {
 				return nil, diags
 			}
 			columns = make([]client.Column, len(colModels))
@@ -994,6 +1018,12 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 			GroupNumber:       0,
 			GroupItemPriority: 0,
 		}
+	}
+
+	// Any error above (failed lookup, empty column result) means no job is built,
+	// so callers cannot PUT a partial or column-less job.
+	if diags.HasError() {
+		return nil, diags
 	}
 
 	job.DataStores = dataStores
