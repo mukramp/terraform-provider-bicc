@@ -13,7 +13,7 @@ var ErrNotFound = errors.New("not found")
 
 // NotFoundError means the BICC API answered that the job does not exist, as decided
 // by isJobNotFound (HTTP 400 "Invalid Job Id provided", observed on SIT 2026-11-04, A6).
-// It is returned by GetJob and DeleteJob and by nothing else.
+// It is returned by GetJob and by nothing else (DeleteJob has no not-found mapping).
 // Network errors, auth errors, 5xx and unparseable bodies are never NotFoundError.
 type NotFoundError struct {
 	JobID      int64
@@ -34,7 +34,7 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &nf)
 }
 
-// isJobNotFound is the ONE place that decides whether a response to GET/DELETE on
+// isJobNotFound is the ONE place that decides whether a response to GET on
 // /biacm/rest/meta/jobs/{id} means "the job does not exist".
 //
 // OBSERVED 2026-11-04 on SIT (docs/ASSUMPTIONS.md A6, read-only GETs): a numeric id that
@@ -44,12 +44,14 @@ func IsNotFound(err error) bool {
 //
 // "Deleted" and "never existed" cannot be told apart. A non-numeric or overflowing id
 // returns a plain-text HTTP 404 "Not Found" from the routing layer, which is NOT a
-// missing job. A repeat DELETE of a missing id returns HTTP 200 (A5), so DELETE never
-// reaches this predicate in the live case.
+// missing job. A repeat DELETE of a missing id returns HTTP 200 (A5); DeleteJob does not use
+// this predicate, and any non-2xx DELETE is an error.
 //
-// The predicate is deliberately narrow and true only for: status 400, a JSON body whose
-// code is exactly "Bad Request" and whose message contains "invalid job id"
-// (case-insensitive). In particular:
+// The predicate is deliberately narrow and true only for: status 400 and a JSON body whose
+// code is exactly "Bad Request" and whose message, trimmed of surrounding whitespace, is
+// exactly "Invalid Job Id provided" (the only observed text; case-sensitive, no substring
+// match, so near misses such as "Invalid Job state" or "Invalid column" are errors). In
+// particular:
 //   - a bare 404 is never "job gone": a wrong host, port or proxy could answer 404 for
 //     every path, and Read would then drop every job from state (the plan would
 //     recreate them all);
@@ -70,5 +72,5 @@ func isJobNotFound(statusCode int, body []byte) bool {
 	if err := json.Unmarshal(body, &e); err != nil {
 		return false
 	}
-	return e.Code == "Bad Request" && strings.Contains(strings.ToLower(e.Message), "invalid job id")
+	return e.Code == "Bad Request" && strings.TrimSpace(e.Message) == "Invalid Job Id provided"
 }

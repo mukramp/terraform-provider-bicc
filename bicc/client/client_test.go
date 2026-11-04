@@ -268,7 +268,8 @@ func assertNotTyped(t *testing.T, err error, status int) {
 // job id that does not exist (ASSUMPTIONS A6, observed, read-only GET).
 const liveMissingJobBody = `{"code":"Bad Request","message":"Invalid Job Id provided"}`
 
-// The predicate is true ONLY for 400 + JSON {code:"Bad Request", message ~ "invalid job id"}.
+// The predicate is true ONLY for 400 + JSON {code:"Bad Request", message "Invalid Job Id
+// provided"} (exact, case-sensitive, message compared after trimming whitespace).
 // Everything else, in particular a bare 404, must be false: a wrong host/proxy answering
 // 404 for every path would otherwise make Read drop every job from state.
 func TestIsJobNotFound(t *testing.T) {
@@ -279,9 +280,16 @@ func TestIsJobNotFound(t *testing.T) {
 		want   bool
 	}{
 		{"400 exact live body", 400, liveMissingJobBody, true},
-		{"400 message in other case", 400, `{"code":"Bad Request","message":"INVALID JOB ID provided"}`, true},
-		{"400 message lower case", 400, `{"code":"Bad Request","message":"invalid job id"}`, true},
-		{"400 message with extra text", 400, `{"code":"Bad Request","message":"Error: Invalid Job Id provided for request 42"}`, true},
+		{"400 message with surrounding whitespace is trimmed", 400, `{"code":"Bad Request","message":"  Invalid Job Id provided\n"}`, true},
+		// Exact match only: the one observed text is "Invalid Job Id provided".
+		{"400 message in upper case", 400, `{"code":"Bad Request","message":"INVALID JOB ID provided"}`, false},
+		{"400 message in lower case", 400, `{"code":"Bad Request","message":"invalid job id provided"}`, false},
+		{"400 message without 'provided'", 400, `{"code":"Bad Request","message":"Invalid Job Id"}`, false},
+		{"400 message with extra text", 400, `{"code":"Bad Request","message":"Error: Invalid Job Id provided for request 42"}`, false},
+		{"400 message with trailing text", 400, `{"code":"Bad Request","message":"Invalid Job Id provided."}`, false},
+		{"400 near miss: Invalid column", 400, `{"code":"Bad Request","message":"Invalid column"}`, false},
+		{"400 near miss: Invalid Job state", 400, `{"code":"Bad Request","message":"Invalid Job state"}`, false},
+		{"400 near miss: Invalid Data Store Id provided", 400, `{"code":"Bad Request","message":"Invalid Data Store Id provided"}`, false},
 		{"400 JSON with extra fields", 400, `{"code":"Bad Request","message":"Invalid Job Id provided","extra":1}`, true},
 		{"400 empty body", 400, ``, false},
 		{"400 non-JSON body", 400, `Invalid Job Id provided`, false},
@@ -394,9 +402,11 @@ func TestDeleteJob(t *testing.T) {
 	})
 
 	// OBSERVED 2026-11-04 (A5): DELETE of an already-missing id returns HTTP 200, so the
-	// live case is the success path above. The two cases below are DEFENSIVE: BICC has
-	// not been seen to answer a DELETE this way.
-	t.Run("defensive: 400 Invalid Job Id (live GET body) returns typed not-found error", func(t *testing.T) {
+	// live case is the success path above. DeleteJob has NO not-found mapping: any non-2xx
+	// is an error, including the GET not-found shape (400 Invalid Job Id) and a bare 404.
+	// Mapping them to success would report a delete that did not happen while the job
+	// stays on BICC.
+	t.Run("400 with the live GET not-found body is an untyped error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(liveMissingJobBody))
@@ -405,12 +415,12 @@ func TestDeleteJob(t *testing.T) {
 
 		err := newTestClient(t, srv).DeleteJob(context.Background(), 7)
 		if err == nil {
-			t.Fatal("expected error for 400 Invalid Job Id")
+			t.Fatal("expected error for 400 on DELETE")
 		}
-		assertNotFound(t, err, 7, http.MethodDelete, http.StatusBadRequest)
+		assertNotTyped(t, err, 400)
 	})
 
-	t.Run("defensive: bare 404 is an untyped error, not not-found", func(t *testing.T) {
+	t.Run("404 Not Found is an untyped error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			w.Write([]byte("Not Found"))
@@ -419,7 +429,7 @@ func TestDeleteJob(t *testing.T) {
 
 		err := newTestClient(t, srv).DeleteJob(context.Background(), 7)
 		if err == nil {
-			t.Fatal("expected error for 404")
+			t.Fatal("expected error for 404 on DELETE")
 		}
 		assertNotTyped(t, err, 404)
 	})

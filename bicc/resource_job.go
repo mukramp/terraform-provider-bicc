@@ -10,7 +10,6 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -270,26 +269,35 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	plan.ID = types.StringValue(strconv.FormatInt(jobResp.ID, 10))
-
-	// The job now exists on BICC. Record its id (and the known config values) in state
-	// BEFORE anything else can fail, so that a failure below leaves Terraform tracking
-	// the resource (saved as tainted because Create returns an error) instead of
-	// forgetting a job that exists and re-PUTting blindly on the next apply. Attributes
-	// that are still unknown in the plan are deliberately not written here.
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), plan.ID)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), plan.Name)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("description"), plan.Description)...)
-	if resp.Diagnostics.HasError() {
+	// A PUT answer with an id that is not a positive number cannot be read back (BICC
+	// answers 400 "Invalid Job Id" for it, A6) and cannot be tracked: fail before any GET
+	// and write no state.
+	if jobResp.ID <= 0 {
+		resp.Diagnostics.AddError("Error creating job",
+			fmt.Sprintf("The PUT returned HTTP success but BICC returned an unusable id %d for the job. "+
+				"No state was saved and the job was not read back.", jobResp.ID))
 		return
 	}
+
+	plan.ID = types.StringValue(strconv.FormatInt(jobResp.ID, 10))
+
+	// Do NOT write any state before the re-read below succeeds. If state held the id and
+	// Create then returned an error, Terraform would save it tainted and the next apply
+	// would plan DELETE (about 150s on SIT) followed by create. PUT upserts by name, so if
+	// the name matched a job created outside Terraform, that DELETE would remove a real
+	// job after a transient re-read failure. With no state, the next apply re-sends the
+	// same PUT, which converges without a delete (A1 unverified for rename). The cost is
+	// an orphan job on BICC until that next apply (KI-5); the error below says so.
 
 	// Re-read from the API so all Computed fields (is_effective_date_disabled,
 	// initial_extract_date, columns, etc.) are populated in state. Without this,
 	// Optional+Computed fields not set in config remain unknown after Create.
 	refreshed, err := r.client.GetJob(ctx, jobResp.ID)
 	if err != nil {
-		resp.Diagnostics.AddError("Error reading job after create", err.Error())
+		resp.Diagnostics.AddError("Error reading job after create",
+			fmt.Sprintf("The PUT succeeded: job %d exists on BICC, but reading it back failed: %s\n\n"+
+				"No state was saved. PUT upserts by name, so re-running apply re-sends the same job "+
+				"and converges on the same BICC job (no data loss).", jobResp.ID, err))
 		return
 	}
 
@@ -312,6 +320,24 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
+// parseStateJobID turns the id stored in state into a job id for Read and Delete. It
+// accepts only a positive base-10 int64. Anything else (empty, non-numeric, overflow,
+// leading space, 0, negative) adds an error diagnostic and returns false BEFORE any HTTP
+// call: BICC answers 400 "Invalid Job Id provided" for such ids (A6), which Read would
+// read as "job gone" and drop from state, so they must never reach the API (KI-5).
+func parseStateJobID(raw string, diags *diag.Diagnostics) (int64, bool) {
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		diags.AddError("Invalid job ID", fmt.Sprintf("State holds job id %q, which is not a number; state left unchanged: %s", raw, err))
+		return 0, false
+	}
+	if id <= 0 {
+		diags.AddError("Invalid job ID", fmt.Sprintf("State holds job id %q, which is not a positive number; state left unchanged.", raw))
+		return 0, false
+	}
+	return id, true
+}
+
 func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state biccJobModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -319,9 +345,8 @@ func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	jobID, err := strconv.ParseInt(state.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID", err.Error())
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
@@ -434,18 +459,17 @@ func (r *biccJobResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	jobID, err := strconv.ParseInt(state.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID", err.Error())
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
 	// Delete is idempotent because BICC answers HTTP 200 for a repeat DELETE of a missing
-	// id (OBSERVED 2026-11-04, ASSUMPTIONS A5). The NotFoundError exemption below is
-	// DEFENSIVE (a DELETE has not been seen to return the GET not-found shape). Any other
-	// failure is an error, and there are no retries (ASSUMPTIONS C2). Deletes take about
-	// 2.5 minutes on SIT (A10), against the 300s client timeout.
-	if err := r.client.DeleteJob(ctx, jobID); err != nil && !client.IsNotFound(err) {
+	// id (OBSERVED 2026-11-04, ASSUMPTIONS A5). There is no not-found exemption: any
+	// non-2xx (including 400 and 404) is an error, because reporting success while the job
+	// may still exist on BICC would drop it from Terraform. No retries (ASSUMPTIONS C2).
+	// Deletes take about 2.5 minutes on SIT (A10), against the 300s client timeout.
+	if err := r.client.DeleteJob(ctx, jobID); err != nil {
 		resp.Diagnostics.AddError("Error deleting job", err.Error())
 	}
 }

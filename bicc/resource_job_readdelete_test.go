@@ -4,13 +4,13 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -67,10 +67,15 @@ func resourceSchema(t *testing.T) *resource.SchemaResponse {
 // existingState builds a state holding a job with the given ID, name and description.
 func existingState(t *testing.T) tfsdk.State {
 	t.Helper()
+	return stateWithID(t, testJobID)
+}
+
+func stateWithID(t *testing.T, id string) tfsdk.State {
+	t.Helper()
 	sr := resourceSchema(t)
 	state := tfsdk.State{Schema: sr.Schema}
 	model := biccJobModel{
-		ID:          types.StringValue(testJobID),
+		ID:          types.StringValue(id),
 		Name:        types.StringValue("SIT_TEST_JOB"),
 		Description: types.StringValue("old description"),
 		DataStores:  types.SetValueMust(types.ObjectType{AttrTypes: dataStoreAttrTypes}, []attr.Value{}),
@@ -215,7 +220,52 @@ func TestReadRemovesStateOnlyOnNotFound(t *testing.T) {
 	})
 }
 
-func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
+// An id in state that is not a positive int64 must never reach the API and never drop
+// state or delete anything: Read and Delete return an error, keep state and make ZERO
+// HTTP calls. (If the mock were reached it would answer the live "job missing" 400 for
+// GET and 200 for DELETE, which is exactly what would wrongly drop state or "succeed".)
+func TestReadDeleteRejectUnusableStateIDs(t *testing.T) {
+	ids := []string{"", "abc", "99999999999999999999", " 4242", "0", "-5"}
+	handler := func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(liveMissingJobBody))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+	for _, id := range ids {
+		id := id
+		t.Run("Read id="+strconv.Quote(id), func(t *testing.T) {
+			r, calls := newMockedResource(t, handler)
+			resp := runRead(t, r, stateWithID(t, id))
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if resp.State.Raw.IsNull() {
+				t.Fatal("state was removed for an unusable id")
+			}
+			if got := atomic.LoadInt32(calls); got != 0 {
+				t.Errorf("expected 0 HTTP calls, got %d", got)
+			}
+		})
+		t.Run("Delete id="+strconv.Quote(id), func(t *testing.T) {
+			r, calls := newMockedResource(t, handler)
+			resp := runDelete(t, r, stateWithID(t, id))
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if resp.State.Raw.IsNull() {
+				t.Fatal("state was removed for an unusable id")
+			}
+			if got := atomic.LoadInt32(calls); got != 0 {
+				t.Errorf("expected 0 HTTP calls, got %d", got)
+			}
+		})
+	}
+}
+
+func TestDeleteIdempotencyAndErrors(t *testing.T) {
 	// OBSERVED 2026-11-04 (A5): DELETE of an already-missing id returns HTTP 200, so a
 	// repeated or racing delete succeeds through the ordinary success path.
 	t.Run("200 for an already-missing job (live shape) succeeds", func(t *testing.T) {
@@ -228,22 +278,6 @@ func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
 		resp := runDelete(t, r, existingState(t))
 		if resp.Diagnostics.HasError() {
 			t.Fatalf("delete of an already-missing job must succeed, got: %v", resp.Diagnostics)
-		}
-		if got := atomic.LoadInt32(calls); got != 1 {
-			t.Errorf("expected exactly 1 request (no retries), got %d", got)
-		}
-	})
-
-	// DEFENSIVE: BICC has not been observed to answer a DELETE with the GET not-found
-	// shape. If it ever does, Delete still succeeds.
-	t.Run("defensive: 400 Invalid Job Id body counts as success", func(t *testing.T) {
-		r, calls := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(liveMissingJobBody))
-		})
-		resp := runDelete(t, r, existingState(t))
-		if resp.Diagnostics.HasError() {
-			t.Fatalf("unexpected error: %v", resp.Diagnostics)
 		}
 		if got := atomic.LoadInt32(calls); got != 1 {
 			t.Errorf("expected exactly 1 request (no retries), got %d", got)
@@ -268,8 +302,10 @@ func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
 		{"401", http.StatusUnauthorized, ``},
 		{"403", http.StatusForbidden, ``},
 		{"400 other message", http.StatusBadRequest, `{"code":"Bad Request","message":"JBO-26048: Constraint violated"}`},
+		// Not mapped to success: the job could still exist on BICC.
+		{"400 with the live GET not-found body", http.StatusBadRequest, liveMissingJobBody},
 		{"400 empty", http.StatusBadRequest, ``},
-		// A bare 404 is not "job gone" (A6), so Delete reports it instead of hiding it.
+		// DELETE has no not-found mapping: 404 is an error, never reported as success.
 		{"404 Not Found", http.StatusNotFound, `Not Found`},
 		{"500 with the live body", http.StatusInternalServerError, liveMissingJobBody},
 	}
@@ -291,31 +327,33 @@ func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
 	}
 }
 
-// Create: after a successful PUT the job exists on BICC. If the re-read then fails, the id
-// must already be in state, so Terraform tracks the resource (tainted, because Create
-// returns an error) instead of forgetting it and re-PUTting blindly on the next apply.
-func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
-	newReq := func(t *testing.T) (resource.CreateRequest, *resource.CreateResponse) {
-		t.Helper()
-		sr := resourceSchema(t)
-		plan := tfsdk.Plan{Schema: sr.Schema}
-		model := biccJobModel{
-			ID:          types.StringUnknown(),
-			Name:        types.StringValue("SIT_TEST_JOB"),
-			Description: types.StringValue("desc"),
-			DataStores:  types.SetValueMust(types.ObjectType{AttrTypes: dataStoreAttrTypes}, []attr.Value{}),
-		}
-		if diags := plan.Set(context.Background(), model); diags.HasError() {
-			t.Fatalf("building plan: %v", diags)
-		}
-		// The framework hands Create a null state of the schema's type.
-		resp := &resource.CreateResponse{State: tfsdk.State{
-			Schema: sr.Schema,
-			Raw:    tftypes.NewValue(sr.Schema.Type().TerraformType(context.Background()), nil),
-		}}
-		return resource.CreateRequest{Plan: plan}, resp
+// Create: PUT upserts by name. If the PUT succeeded and the re-read fails, Create must NOT
+// write any state: state with an id would be saved tainted and the next apply would plan
+// DELETE (about 150s on SIT) and create, which would delete a real job if the name matched
+// one created outside Terraform. With no state the next apply re-sends the same PUT, which
+// converges (A1 unverified for rename). The job is an orphan until then; the error says so.
+func newCreateReq(t *testing.T) (resource.CreateRequest, *resource.CreateResponse) {
+	t.Helper()
+	sr := resourceSchema(t)
+	plan := tfsdk.Plan{Schema: sr.Schema}
+	model := biccJobModel{
+		ID:          types.StringUnknown(),
+		Name:        types.StringValue("SIT_TEST_JOB"),
+		Description: types.StringValue("desc"),
+		DataStores:  types.SetValueMust(types.ObjectType{AttrTypes: dataStoreAttrTypes}, []attr.Value{}),
 	}
+	if diags := plan.Set(context.Background(), model); diags.HasError() {
+		t.Fatalf("building plan: %v", diags)
+	}
+	// The framework hands Create a null state of the schema's type.
+	resp := &resource.CreateResponse{State: tfsdk.State{
+		Schema: sr.Schema,
+		Raw:    tftypes.NewValue(sr.Schema.Type().TerraformType(context.Background()), nil),
+	}}
+	return resource.CreateRequest{Plan: plan}, resp
+}
 
+func TestCreateLeavesStateEmptyWhenReReadFails(t *testing.T) {
 	failures := []struct {
 		name   string
 		status int
@@ -327,7 +365,7 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 	}
 	for _, tc := range failures {
 		tc := tc
-		t.Run(tc.name+" keeps the id in state and reports an error", func(t *testing.T) {
+		t.Run(tc.name+" leaves state empty and reports the orphan", func(t *testing.T) {
 			var puts int32
 			r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
 				switch req.Method {
@@ -339,21 +377,23 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 					_, _ = w.Write([]byte(tc.body))
 				}
 			})
-			req, resp := newReq(t)
+			req, resp := newCreateReq(t)
 			r.Create(context.Background(), req, resp)
 
 			if !resp.Diagnostics.HasError() {
 				t.Fatal("expected an error diagnostic")
 			}
-			if resp.State.Raw.IsNull() {
-				t.Fatal("state is empty after a successful PUT: the job would exist on BICC untracked")
+			if !resp.State.Raw.IsNull() {
+				t.Fatal("state must stay EMPTY when the re-read fails: tainted state would make the next apply delete the job")
 			}
-			var id types.String
-			if diags := resp.State.GetAttribute(context.Background(), path.Root("id"), &id); diags.HasError() {
-				t.Fatalf("reading id: %v", diags)
+			var msg string
+			for _, d := range resp.Diagnostics.Errors() {
+				msg += d.Summary() + " " + d.Detail()
 			}
-			if id.ValueString() != "555" {
-				t.Errorf("state id = %q, want %q", id.ValueString(), "555")
+			for _, want := range []string{"555", "exists on BICC", "upserts by name", "re-sends the same job", "no data loss"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error message lacks %q: %s", want, msg)
+				}
 			}
 			if got := atomic.LoadInt32(&puts); got != 1 {
 				t.Errorf("expected exactly 1 PUT, got %d", got)
@@ -365,7 +405,7 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 		r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		})
-		req, resp := newReq(t)
+		req, resp := newCreateReq(t)
 		r.Create(context.Background(), req, resp)
 		if !resp.Diagnostics.HasError() {
 			t.Fatal("expected an error diagnostic")
@@ -383,7 +423,7 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"name":"SIT_TEST_JOB","description":"desc","dataStores":[],"schedules":null}`))
 		})
-		req, resp := newReq(t)
+		req, resp := newCreateReq(t)
 		r.Create(context.Background(), req, resp)
 		if resp.Diagnostics.HasError() {
 			t.Fatalf("unexpected error: %v", resp.Diagnostics)
@@ -396,4 +436,47 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 			t.Errorf("unexpected state: %+v", m)
 		}
 	})
+}
+
+// MINOR-6: a PUT that answers 200 with an unusable id (0 or negative) must not lead to a
+// GET of that id (BICC answers 400 "Invalid Job Id" for it) and must not set state.
+func TestCreateRejectsUnusablePUTResponseID(t *testing.T) {
+	for _, id := range []string{"0", "-1"} {
+		id := id
+		t.Run("PUT response id "+id, func(t *testing.T) {
+			var gets, puts int32
+			r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodPut {
+					atomic.AddInt32(&puts, 1)
+					_, _ = w.Write([]byte(`{"status":"success","id":"` + id + `"}`))
+					return
+				}
+				atomic.AddInt32(&gets, 1)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(liveMissingJobBody))
+			})
+			req, resp := newCreateReq(t)
+			r.Create(context.Background(), req, resp)
+
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if !resp.State.Raw.IsNull() {
+				t.Fatal("state must stay empty")
+			}
+			if got := atomic.LoadInt32(&gets); got != 0 {
+				t.Errorf("expected 0 GETs, got %d", got)
+			}
+			if got := atomic.LoadInt32(&puts); got != 1 {
+				t.Errorf("expected exactly 1 PUT, got %d", got)
+			}
+			var msg string
+			for _, d := range resp.Diagnostics.Errors() {
+				msg += d.Summary() + " " + d.Detail()
+			}
+			if !strings.Contains(msg, "unusable id") || !strings.Contains(msg, id) {
+				t.Errorf("error message should mention the unusable id %s: %s", id, msg)
+			}
+		})
+	}
 }

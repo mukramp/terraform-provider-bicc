@@ -216,9 +216,10 @@ func (c *Client) GetDataStoreColumns(ctx context.Context, dataStoreKey string) (
 // repeat DELETE of the now-missing id returns HTTP 200, so idempotency comes from BICC
 // itself, not from not-found handling.
 //
-// The *NotFoundError branch below is DEFENSIVE: BICC has not been seen to answer a DELETE
-// with the GET not-found shape (400 "Invalid Job Id provided", see isJobNotFound), but if
-// it does, the caller may treat it as already deleted. A bare 404 is an ordinary error.
+// Any status other than 200 or 204 is an ordinary error, including 400 (even with the GET
+// not-found body) and 404. There is deliberately NO not-found mapping here: the 400
+// "Invalid Job Id" shape was observed for GET only, and treating a failed DELETE as
+// success would report a delete that did not happen while the job stays on BICC.
 // No retries (ASSUMPTIONS C2).
 func (c *Client) DeleteJob(ctx context.Context, jobID int64) error {
 	path := fmt.Sprintf("/biacm/rest/meta/jobs/%d", jobID)
@@ -234,8 +235,5 @@ func (c *Client) DeleteJob(ctx context.Context, jobID int64) error {
 	}
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
-	if isJobNotFound(resp.StatusCode, bodyBytes) {
-		return &NotFoundError{JobID: jobID, Method: http.MethodDelete, StatusCode: resp.StatusCode}
-	}
 	return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
 }
