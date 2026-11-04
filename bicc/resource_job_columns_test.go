@@ -352,10 +352,10 @@ func TestBuildJob_LookupSucceedsButZeroColumns_Errors(t *testing.T) {
 			Name: types.StringValue("j"), DataStores: autoDataStoreSet(t, nil, "Pk.Only"),
 		})
 		if !diags.HasError() || job != nil {
-			t.Fatalf("expected error and nil job, got job=%v diags=%v", job, diags)
+			t.Fatalf("expected error and nil job, got job=%v diags=%v (pinned pre-existing behaviour, KI-12; if you changed this on purpose, update this test and docs/KNOWN-ISSUES.md)", job, diags)
 		}
 		if !strings.Contains(errorText(diags), "no column remains populated") {
-			t.Errorf("message should state the real condition, got:\n%s", errorText(diags))
+			t.Errorf("message should state the real condition, got:\n%s (pinned pre-existing behaviour, KI-12; if you changed this on purpose, update this test and docs/KNOWN-ISSUES.md)", errorText(diags))
 		}
 	})
 
@@ -516,10 +516,10 @@ func TestBuildJob_PreExisting_PrimaryKeyWithIsPopulateFalse(t *testing.T) {
 			Name: types.StringValue("j"), DataStores: autoDataStoreSet(t, nil, "K"),
 		})
 		if diags.HasError() {
-			t.Fatalf("unexpected error: %v", diags)
+			t.Fatalf("unexpected error: %v (pinned pre-existing behaviour, KI-12; if you changed this on purpose, update this test and docs/KNOWN-ISSUES.md)", diags)
 		}
 		if got := names(job); len(got) != 1 || got[0] != "NAME" {
-			t.Errorf("current behaviour: only NAME is sent, got %v", got)
+			t.Errorf("current behaviour: only NAME is sent, got %v (pinned pre-existing behaviour, KI-12; if you changed this on purpose, update this test and docs/KNOWN-ISSUES.md)", got)
 		}
 	})
 
@@ -531,10 +531,10 @@ func TestBuildJob_PreExisting_PrimaryKeyWithIsPopulateFalse(t *testing.T) {
 				map[string][]attr.Value{"K": {overrideSetPopulate(t, "ID", true)}}, "K"),
 		})
 		if diags.HasError() {
-			t.Fatalf("unexpected error: %v", diags)
+			t.Fatalf("unexpected error: %v (pinned pre-existing behaviour, KI-12; if you changed this on purpose, update this test and docs/KNOWN-ISSUES.md)", diags)
 		}
 		if got := names(job); len(got) != 2 || got[0] != "ID" || got[1] != "NAME" {
-			t.Errorf("want [ID NAME], got %v", got)
+			t.Errorf("want [ID NAME], got %v (pinned pre-existing behaviour, KI-12; if you changed this on purpose, update this test and docs/KNOWN-ISSUES.md)", got)
 		}
 	})
 
@@ -546,10 +546,10 @@ func TestBuildJob_PreExisting_PrimaryKeyWithIsPopulateFalse(t *testing.T) {
 				map[string][]attr.Value{"K": {overrideSetPopulate(t, "OTHER", true)}}, "K"),
 		})
 		if diags.HasError() {
-			t.Fatalf("unexpected error: %v", diags)
+			t.Fatalf("unexpected error: %v (pinned pre-existing behaviour, KI-12; if you changed this on purpose, update this test and docs/KNOWN-ISSUES.md)", diags)
 		}
 		if got := names(job); len(got) != 1 || got[0] != "NAME" {
-			t.Errorf("current behaviour: OTHER is not added, got %v", got)
+			t.Errorf("current behaviour: OTHER is not added, got %v (pinned pre-existing behaviour, KI-12; if you changed this on purpose, update this test and docs/KNOWN-ISSUES.md)", got)
 		}
 	})
 }
