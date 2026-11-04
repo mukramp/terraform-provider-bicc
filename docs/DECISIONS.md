@@ -90,7 +90,7 @@ Options from the old plan:
 - Default if unanswered: no prd use until answered.
 
 ### Q11. Raise the HTTP client timeout for PUT and DELETE?
-- Observed deletes take about 150s and one create 28s against a fixed 300s timeout (ASSUMPTIONS A10). If the timeout fires after BICC deleted the job, the next run recovers cleanly with the task 5 predicate.
+- Observed deletes take about 150s and one create 28s against a fixed 300s timeout (ASSUMPTIONS A10). If the timeout fires after BICC deleted the job, the next run recovers cleanly with the task 5 predicate. That "next run recovers" claim is traced from code and pinned only by a mock test (`TestDeleteTimeoutThenReadRecovers`: Delete times out and keeps state, then Read with the live 400 body removes state); it is not observed on BICC. What happens when a GET lands while BICC is still deleting, or when two DELETEs overlap, is unknown (C2).
 - Options: A. Leave it (default). B. Make the timeout configurable or raise it for PUT and DELETE only (separate yellow-lane change).
 - Default if unanswered: A.
 
