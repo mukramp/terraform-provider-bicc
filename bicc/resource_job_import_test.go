@@ -376,14 +376,33 @@ func TestImportRejectsBadIDs(t *testing.T) {
 	}
 }
 
+// Ids that strconv accepts but that are not the canonical form: the id stored in state is
+// always the canonical decimal ("7"), because Read and Delete later parse it strictly and
+// the API path is built from the parsed number.
 func TestImportNormalisesNumericID(t *testing.T) {
-	r, _ := newMockedResource(t, jobGetHandler(t, importJobBody))
-	resp := runImport(t, r, "007")
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("import: %v", resp.Diagnostics)
-	}
-	if got := modelOf(t, resp.State).ID.ValueString(); got != "7" {
-		t.Errorf("id = %q, want canonical %q", got, "7")
+	for _, tc := range []struct{ in, want string }{
+		{"007", "7"},
+		{"+7", "7"},
+		{"4242", "4242"},
+	} {
+		tc := tc
+		t.Run("id="+tc.in, func(t *testing.T) {
+			var path string
+			r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+				path = req.URL.Path
+				jobGetHandler(t, importJobBody)(w, req)
+			})
+			resp := runImport(t, r, tc.in)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("import: %v", resp.Diagnostics)
+			}
+			if got := modelOf(t, resp.State).ID.ValueString(); got != tc.want {
+				t.Errorf("id = %q, want canonical %q", got, tc.want)
+			}
+			if want := "/biacm/rest/meta/jobs/" + tc.want; path != want {
+				t.Errorf("GET path = %q, want %q (the API path must use the canonical id too)", path, want)
+			}
+		})
 	}
 }
 
