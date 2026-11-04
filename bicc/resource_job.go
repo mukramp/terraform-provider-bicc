@@ -731,8 +731,12 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 				}
 
 				var overrides []columnOverrideModel
-				diags.Append(ds.ColumnOverrides.ElementsAs(ctx, &overrides, false)...)
-				if diags.HasError() {
+				// Check this call's own diagnostics: diags may already hold an
+				// earlier store's lookup error, and that must not abort the loop
+				// (all failing stores are reported).
+				d := ds.ColumnOverrides.ElementsAs(ctx, &overrides, false)
+				diags.Append(d...)
+				if d.HasError() {
 					return nil, diags
 				}
 				overrideMap := make(map[string]columnOverrideModel, len(overrides))
@@ -783,8 +787,9 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 			}
 		} else {
 			var colModels []columnModel
-			diags.Append(ds.Columns.ElementsAs(ctx, &colModels, false)...)
-			if diags.HasError() {
+			d := ds.Columns.ElementsAs(ctx, &colModels, false)
+			diags.Append(d...)
+			if d.HasError() {
 				return nil, diags
 			}
 			columns = make([]client.Column, len(colModels))

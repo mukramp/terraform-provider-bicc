@@ -345,3 +345,53 @@ func TestBuildJob_LookupSucceeds_BuildsColumns(t *testing.T) {
 		t.Error("buildJobFromModel must not PUT")
 	}
 }
+
+// MINOR-3: every failing store is reported, not only the first one. A later
+// store's ElementsAs must not trip on an earlier store's lookup error.
+func TestBuildJob_TwoBadKeysAmongGood_BothReported(t *testing.T) {
+	m := newMockBICC(t, map[string]mockReply{
+		"Good.One": {http.StatusOK, okColumnsBody()},
+		"Good.Two": {http.StatusOK, okColumnsBody()},
+	})
+	r := m.resource()
+	ds := autoDataStoreSet(t, nil, "Good.One", "Bad.Key", "Good.Two", "Bad.Two")
+
+	t.Run("buildJobFromModel", func(t *testing.T) {
+		job, diags := r.buildJobFromModel(context.Background(), biccJobModel{
+			Name: types.StringValue("j"), DataStores: ds,
+		})
+		if !diags.HasError() || job != nil {
+			t.Fatalf("expected error and nil job, got job=%v diags=%v", job, diags)
+		}
+		txt := errorText(diags)
+		for _, want := range []string{"Bad.Key", "Bad.Two"} {
+			if !strings.Contains(txt, want) {
+				t.Errorf("diagnostic should name %q, got:\n%s", want, txt)
+			}
+		}
+		for _, bad := range []string{"Good.One", "Good.Two"} {
+			if strings.Contains(txt, bad) {
+				t.Errorf("diagnostic should not name %q, got:\n%s", bad, txt)
+			}
+		}
+	})
+
+	t.Run("Create reports both and sends no PUT", func(t *testing.T) {
+		model := biccJobModel{
+			ID: types.StringUnknown(), Name: types.StringValue("tf-task6-two-bad"),
+			Description: types.StringValue(""), DataStores: ds,
+		}
+		req := resource.CreateRequest{Plan: planFor(t, r, model)}
+		resp := &resource.CreateResponse{State: tfsdk.State{Schema: req.Plan.Schema, Raw: tftypes.NewValue(req.Plan.Schema.Type().TerraformType(context.Background()), nil)}}
+		r.Create(context.Background(), req, resp)
+		txt := errorText(resp.Diagnostics)
+		for _, want := range []string{"Bad.Key", "Bad.Two"} {
+			if !strings.Contains(txt, want) {
+				t.Errorf("Create diagnostic should name %q, got:\n%s", want, txt)
+			}
+		}
+		if n := m.putCount(); n != 0 {
+			t.Errorf("a job was PUT %d time(s); want 0", n)
+		}
+	})
+}
