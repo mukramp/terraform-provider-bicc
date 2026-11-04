@@ -39,17 +39,17 @@ func (p *biccProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp 
 		Description: "Provider for managing Oracle Business Intelligence Cloud Connector (BICC) extraction jobs.",
 		Attributes: map[string]schema.Attribute{
 			"host": schema.StringAttribute{
-				Required:    true,
-				Description: "The Oracle Fusion Applications hostname (e.g., servername.fa.us2.oraclecloud.com). Can also be set via BICC_HOST environment variable.",
+				Optional:    true,
+				Description: "The Oracle Fusion Applications hostname (e.g., servername.fa.us2.oraclecloud.com). Can also be set via BICC_HOST environment variable. Required unless the environment variable is set.",
 			},
 			"username": schema.StringAttribute{
-				Required:    true,
-				Description: "Username for BICC authentication. Can also be set via BICC_USERNAME environment variable.",
+				Optional:    true,
+				Description: "Username for BICC authentication. Can also be set via BICC_USERNAME environment variable. Required unless the environment variable is set.",
 			},
 			"password": schema.StringAttribute{
-				Required:    true,
+				Optional:    true,
 				Sensitive:   true,
-				Description: "Password for BICC authentication. Can also be set via BICC_PASSWORD environment variable.",
+				Description: "Password for BICC authentication. Can also be set via BICC_PASSWORD environment variable. Required unless the environment variable is set.",
 			},
 			"port": schema.Int64Attribute{
 				Optional: true,
