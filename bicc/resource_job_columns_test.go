@@ -457,6 +457,39 @@ func TestBuildJob_TwoBadKeysAmongGood_BothReported(t *testing.T) {
 	})
 }
 
+// Review MINOR-1: a failing auto store, then an explicit-columns store, then
+// another failing auto store. The explicit branch must not stop the loop when an
+// earlier store already recorded an error (guards the `d.HasError()` check in the
+// explicit branch: `diags.HasError()` there would drop Bad.B from the report).
+func TestBuildJob_FailingAutoAroundExplicit_BothReported(t *testing.T) {
+	m := newMockBICC(t, nil) // every lookup -> 500; the explicit store must not look up
+	set := dataStoreSet(t,
+		dataStoreObject(t, "Bad.A", true, nil, nil),
+		dataStoreObject(t, "Explicit.Key", false, nil, []attr.Value{explicitColumn(t, "ID", true)}),
+		dataStoreObject(t, "Bad.B", true, nil, nil),
+	)
+	job, diags := m.resource().buildJobFromModel(context.Background(), biccJobModel{
+		Name: types.StringValue("j"), DataStores: set,
+	})
+	if !diags.HasError() || job != nil {
+		t.Fatalf("expected error and nil job, got job=%v diags=%v", job, diags)
+	}
+	for _, bad := range []string{"Bad.A", "Bad.B"} {
+		n := 0
+		for _, e := range diags.Errors() {
+			if strings.Contains(e.Summary()+e.Detail(), bad) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("want exactly one error diagnostic naming %q, got %d:\n%s", bad, n, errorText(diags))
+		}
+	}
+	if n := m.putCount(); n != 0 {
+		t.Errorf("a job was PUT %d time(s); want 0", n)
+	}
+}
+
 // PRE-EXISTING behaviour, documented, not endorsed (KI-12). The comment in
 // buildJobFromModel says primary key columns are "always included regardless of
 // isPopulate", but the later "Remove columns deselected via overrides" loop
