@@ -568,6 +568,30 @@ func (r *biccJobResource) ImportState(ctx context.Context, req resource.ImportSt
 		return
 	}
 
+	// data_store_key is the identity Read, Create and Update match data stores on, so a
+	// store without a key (no dataStoreMeta, or an empty key) cannot be imported: no config
+	// can match "", and a later PUT would send a keyless store. Two stores with the same key
+	// are ambiguous for the same reason (the set would hold both when their columns differ).
+	seenKeys := make(map[string]struct{}, len(job.DataStores))
+	for i, ds := range job.DataStores {
+		key := ds.DataStoreMeta.DataStoreKey
+		if key == "" {
+			resp.Diagnostics.AddError(
+				"Job to import has a data store without a key",
+				fmt.Sprintf("BICC returned job %d with a data store (position %d in its list) that has no dataStoreKey; not importing. Nothing was imported.", jobID, i),
+			)
+			return
+		}
+		if _, dup := seenKeys[key]; dup {
+			resp.Diagnostics.AddError(
+				"Job to import has duplicate data store keys",
+				fmt.Sprintf("BICC returned job %d with more than one data store with the key %q; not importing. Nothing was imported.", jobID, key),
+			)
+			return
+		}
+		seenKeys[key] = struct{}{}
+	}
+
 	newDataStores, diags := r.buildDataStoresFromAPIMode(ctx, job.DataStores, map[string]dataStoreModel{}, true)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {

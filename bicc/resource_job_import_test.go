@@ -410,16 +410,17 @@ func TestImportNormalisesNumericID(t *testing.T) {
 // error and writes nothing to state.
 func TestImportFailuresLeaveNoState(t *testing.T) {
 	cases := []struct {
-		name   string
-		status int
-		body   string
-		want   string
+		name      string
+		status    int
+		body      string
+		wantTitle string
+		want      string
 	}{
-		{"missing job (400 Invalid Job Id, live shape)", http.StatusBadRequest, liveMissingJobBody, "does not exist or is not visible to this account"},
-		{"500", http.StatusInternalServerError, `boom`, "boom"},
-		{"bare 404", http.StatusNotFound, `Not Found`, "404"},
-		{"401", http.StatusUnauthorized, ``, "401"},
-		{"200 with invalid JSON", http.StatusOK, `not json`, "unmarshal"},
+		{"missing job (400 Invalid Job Id, live shape)", http.StatusBadRequest, liveMissingJobBody, "Job to import does not exist or is not visible", "does not exist or is not visible to this account"},
+		{"500", http.StatusInternalServerError, `boom`, "Error reading job during import", "boom"},
+		{"bare 404", http.StatusNotFound, `Not Found`, "Error reading job during import", "404"},
+		{"401", http.StatusUnauthorized, ``, "Error reading job during import", "401"},
+		{"200 with invalid JSON", http.StatusOK, `not json`, "Error reading job during import", "unmarshal"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -734,5 +735,79 @@ func TestImportAcceptsANamedJobWithoutDataStores(t *testing.T) {
 	}
 	if ds := modelOf(t, imp2.State).DataStores; ds.IsNull() || len(ds.Elements()) != 0 {
 		t.Errorf("data_stores = %v, want a known empty set", ds)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Data store keys on import (final remediation round, item 4).
+// ---------------------------------------------------------------------------
+
+// A data store without dataStoreMeta (or with an empty dataStoreKey) decodes to an empty
+// key. Importing it would put a store with data_store_key = "" into state, which no config
+// can match and which the next PUT would send back as a keyless store. ImportState rejects
+// it, names the job id, and writes no state.
+func TestImportRejectsADataStoreWithoutAKey(t *testing.T) {
+	bodies := map[string]string{
+		"no dataStoreMeta at all":        `{"name":"J","dataStores":[{"groupNumber":0}]}`,
+		"dataStoreMeta without key":      `{"name":"J","dataStores":[{"dataStoreMeta":{"columns":[]}}]}`,
+		"dataStoreKey empty string":      `{"name":"J","dataStores":[{"dataStoreMeta":{"dataStoreKey":"","columns":[]}}]}`,
+		"dataStoreKey null":              `{"name":"J","dataStores":[{"dataStoreMeta":{"dataStoreKey":null,"columns":[]}}]}`,
+		"one good store and one keyless": `{"name":"J","dataStores":[{"dataStoreMeta":{"dataStoreKey":"A.B.C","columns":[]}},{"dataStoreMeta":{"columns":[]}}]}`,
+	}
+	for name, body := range bodies {
+		name, body := name, body
+		t.Run(name, func(t *testing.T) {
+			r, _ := newMockedResource(t, jobGetHandler(t, body))
+			resp := runImport(t, r, "4242")
+			if !resp.Diagnostics.HasError() {
+				t.Fatalf("expected an error diagnostic, state: %v", resp.State.Raw)
+			}
+			if !resp.State.Raw.IsNull() {
+				t.Error("state must stay empty")
+			}
+			d := resp.Diagnostics.Errors()[0]
+			if d.Summary() != "Job to import has a data store without a key" {
+				t.Errorf("title = %q", d.Summary())
+			}
+			if !strings.Contains(d.Detail(), "4242") {
+				t.Errorf("message does not name the job id: %q", d.Detail())
+			}
+		})
+	}
+}
+
+// Two data stores with the same key. BICC is not known to return this (unverified). Before
+// the guard, identical duplicates failed only because the framework rejects a set with equal
+// elements, and duplicates with different columns were imported as two elements with the
+// same key. ImportState now rejects both explicitly, names the job id and the key, and
+// writes no state.
+func TestImportWithDuplicateDataStoreKeysErrorsWithoutState(t *testing.T) {
+	store := func(cols string) string {
+		return `{"dataStoreMeta":{"dataStoreKey":"A.B.C","columns":` + cols + `}}`
+	}
+	col := `[{"name":"X","isPrimaryKey":true,"isPopulate":true}]`
+	bodies := map[string]string{
+		"identical duplicates":        `{"name":"J","dataStores":[` + store(col) + `,` + store(col) + `]}`,
+		"same key, different columns": `{"name":"J","dataStores":[` + store(col) + `,` + store(`[]`) + `]}`,
+	}
+	for name, body := range bodies {
+		name, body := name, body
+		t.Run(name, func(t *testing.T) {
+			r, _ := newMockedResource(t, jobGetHandler(t, body))
+			resp := runImport(t, r, "4242")
+			if !resp.Diagnostics.HasError() {
+				t.Fatalf("expected an error diagnostic, got state %v", resp.State.Raw)
+			}
+			if !resp.State.Raw.IsNull() {
+				t.Error("state must stay empty")
+			}
+			d := resp.Diagnostics.Errors()[0]
+			if d.Summary() != "Job to import has duplicate data store keys" {
+				t.Errorf("title = %q", d.Summary())
+			}
+			if !strings.Contains(d.Detail(), "4242") || !strings.Contains(d.Detail(), "A.B.C") {
+				t.Errorf("message does not name the job id and the key: %q", d.Detail())
+			}
+		})
 	}
 }
