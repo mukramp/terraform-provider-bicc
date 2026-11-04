@@ -138,7 +138,8 @@ func (c *Client) CreateOrUpdateJob(ctx context.Context, job *Job) (*JobResponse,
 
 	var jobResp JobResponse
 	if err := json.Unmarshal(bodyBytes, &jobResp); err != nil {
-		return nil, fmt.Errorf("error unmarshaling response: %v", err)
+		// 2xx was received: the job may exist even though its id is unusable.
+		return nil, &unusableResponseError{err: fmt.Errorf("error unmarshaling response: %v", err)}
 	}
 
 	return &jobResp, nil

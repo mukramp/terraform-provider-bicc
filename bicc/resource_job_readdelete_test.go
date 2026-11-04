@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -265,6 +266,47 @@ func TestReadDeleteRejectUnusableStateIDs(t *testing.T) {
 	}
 }
 
+// Pins the DECISIONS Q11 claim "the next run recovers" at mock level only (not observed on
+// BICC): a Delete that fails on a client timeout keeps state; a following Read that gets the
+// live "Invalid Job Id" 400 (the job did finish deleting on BICC) removes state without error.
+// A GET landing while BICC is still deleting, or two overlapping DELETEs, are unknown (C2).
+func TestDeleteTimeoutThenReadRecovers(t *testing.T) {
+	release := make(chan struct{})
+	var phase int32 // 0: BICC is slow to DELETE; 1: delete has finished, job is gone
+	r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+		if atomic.LoadInt32(&phase) == 0 {
+			<-release
+			return
+		}
+		if req.Method == http.MethodGet {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(liveMissingJobBody))
+			return
+		}
+		t.Errorf("unexpected %s in phase 1", req.Method)
+	})
+	t.Cleanup(func() { close(release) })
+	r.client.HTTPClient.Timeout = 50 * time.Millisecond
+
+	state := existingState(t)
+	dresp := runDelete(t, r, state)
+	if !dresp.Diagnostics.HasError() {
+		t.Fatal("Delete must return an error when the client times out")
+	}
+	if dresp.State.Raw.IsNull() {
+		t.Fatal("state must be kept when Delete fails")
+	}
+
+	atomic.StoreInt32(&phase, 1)
+	rresp := runRead(t, r, dresp.State)
+	if rresp.Diagnostics.HasError() {
+		t.Fatalf("Read of a now-missing job must not error: %v", rresp.Diagnostics)
+	}
+	if !rresp.State.Raw.IsNull() {
+		t.Fatal("Read with the live 400 must remove state")
+	}
+}
+
 func TestDeleteIdempotencyAndErrors(t *testing.T) {
 	// OBSERVED 2026-11-04 (A5): DELETE of an already-missing id returns HTTP 200, so a
 	// repeated or racing delete succeeds through the ordinary success path.
@@ -390,9 +432,32 @@ func TestCreateLeavesStateEmptyWhenReReadFails(t *testing.T) {
 			for _, d := range resp.Diagnostics.Errors() {
 				msg += d.Summary() + " " + d.Detail()
 			}
-			for _, want := range []string{"555", "exists on BICC", "upserts by name", "re-sends the same job", "no data loss"} {
+			// M-1: the only evidence is a 2xx from the PUT, so the message must not claim
+			// the job "exists" or that there is "no data loss"; A1 (same-name re-PUT) is unverified.
+			wants := []string{
+				"BICC acknowledged the PUT with job id 555",
+				"No state was saved",
+				"Re-running apply sends the same job again",
+				"PUT upserts by name as far as reported (A1, unverified)",
+				"should converge, but check BICC for job 555 or the job name first",
+			}
+			notWants := []string{"exists on BICC", "no data loss", "no longer", "job 555 not found"}
+			if tc.status == http.StatusBadRequest {
+				// the live 400 body is typed not-found by the client: not "verified gone"
+				wants = append(wants, "BICC answered that job 555 is unknown (or not visible); it may not have been created")
+				notWants = append(notWants, "reading the job back failed: job")
+			} else {
+				wants = append(wants, "reading the job back failed: ")
+				notWants = append(notWants, "unknown (or not visible)")
+			}
+			for _, want := range wants {
 				if !strings.Contains(msg, want) {
 					t.Errorf("error message lacks %q: %s", want, msg)
+				}
+			}
+			for _, nw := range notWants {
+				if strings.Contains(msg, nw) {
+					t.Errorf("error message must not contain %q: %s", nw, msg)
 				}
 			}
 			if got := atomic.LoadInt32(&puts); got != 1 {
@@ -476,6 +541,120 @@ func TestCreateRejectsUnusablePUTResponseID(t *testing.T) {
 			}
 			if !strings.Contains(msg, "unusable id") || !strings.Contains(msg, id) {
 				t.Errorf("error message should mention the unusable id %s: %s", id, msg)
+			}
+			if !strings.Contains(msg, "may exist on BICC") || !strings.Contains(msg, "Nothing was saved to state") {
+				t.Errorf("error message should say the job may exist and nothing was saved: %s", msg)
+			}
+		})
+	}
+}
+
+// M-3a: a PUT that answers 2xx but whose body has no usable id (JobResponse cannot be
+// decoded) may still have created the job. The diagnostic must say BICC accepted the PUT,
+// that the job may exist under the configured name, and that nothing was saved.
+func TestCreateReportsPossibleOrphanWhenPUTBodyHasNoUsableID(t *testing.T) {
+	for _, body := range []string{`{}`, `{"id":"x"}`, `not json`, `{"id":true}`} {
+		body := body
+		t.Run("PUT 200 body "+body, func(t *testing.T) {
+			var gets int32
+			r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodPut {
+					_, _ = w.Write([]byte(body))
+					return
+				}
+				atomic.AddInt32(&gets, 1)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(liveMissingJobBody))
+			})
+			req, resp := newCreateReq(t)
+			r.Create(context.Background(), req, resp)
+
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if !resp.State.Raw.IsNull() {
+				t.Fatal("state must stay empty")
+			}
+			if got := atomic.LoadInt32(&gets); got != 0 {
+				t.Errorf("expected 0 GETs, got %d", got)
+			}
+			var msg string
+			for _, d := range resp.Diagnostics.Errors() {
+				msg += d.Summary() + " " + d.Detail()
+			}
+			for _, want := range []string{"BICC accepted the PUT", "no usable job id", "may exist on BICC", `"SIT_TEST_JOB"`, "Nothing was saved to state"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error message lacks %q: %s", want, msg)
+				}
+			}
+		})
+	}
+
+	// A non-2xx PUT keeps the plain wording: BICC did not accept anything.
+	t.Run("PUT 500 does not claim the job may exist", func(t *testing.T) {
+		r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		req, resp := newCreateReq(t)
+		r.Create(context.Background(), req, resp)
+		var msg string
+		for _, d := range resp.Diagnostics.Errors() {
+			msg += d.Summary() + " " + d.Detail()
+		}
+		if !resp.Diagnostics.HasError() || strings.Contains(msg, "may exist on BICC") {
+			t.Errorf("unexpected diagnostics: %s", msg)
+		}
+	})
+}
+
+// M-3b: after a successful PUT and GET, a buildDataStoresFromAPI error must carry the same
+// orphan wording naming the job id. NOT covered end to end: no mock GET body can make
+// buildDataStoresFromAPI add an error (probed 2026-11-04: duplicate data stores and
+// duplicate columns both return no diagnostics; the other inputs are typed by the
+// framework). Only the wording helper is pinned here; the wiring in Create is reviewed, not tested.
+func TestOrphanProcessingDetailWording(t *testing.T) {
+	var diags diag.Diagnostics
+	diags.AddError("Value Conversion Error", "boom")
+	msg := orphanProcessingDetail(777, diags)
+	for _, want := range []string{"job id 777", "boom", "No state was saved", "A1, unverified", "check BICC for job 777 or the job name first"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message lacks %q: %s", want, msg)
+		}
+	}
+}
+
+// M-4: Update must validate the state id BEFORE any HTTP call. Same ids as
+// TestReadDeleteRejectUnusableStateIDs. If the mock were reached it would answer PUT 200
+// with an id and GET with the live "missing" 400.
+func TestUpdateRejectsUnusableStateIDs(t *testing.T) {
+	for _, id := range []string{"", "abc", "99999999999999999999", " 4242", "0", "-5"} {
+		id := id
+		t.Run("Update id="+strconv.Quote(id), func(t *testing.T) {
+			r, calls := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodPut {
+					_, _ = w.Write([]byte(`{"status":"success","id":"555"}`))
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(liveMissingJobBody))
+			})
+			state := stateWithID(t, id)
+			createReq, _ := newCreateReq(t)
+			resp := &resource.UpdateResponse{State: tfsdk.State{Schema: state.Schema, Raw: state.Raw.Copy()}}
+			r.Update(context.Background(), resource.UpdateRequest{Plan: tfsdk.Plan{Schema: createReq.Plan.Schema, Raw: createReq.Plan.Raw}, State: state}, resp)
+
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if resp.State.Raw.IsNull() {
+				t.Fatal("state was removed for an unusable id")
+			}
+			var m biccJobModel
+			if diags := resp.State.Get(context.Background(), &m); diags.HasError() || m.ID.ValueString() != id || m.Description.ValueString() != "old description" {
+				t.Errorf("state was modified: %+v %v", m, diags)
+			}
+			if got := atomic.LoadInt32(calls); got != 0 {
+				t.Errorf("expected 0 HTTP calls, got %d", got)
 			}
 		})
 	}

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -116,6 +118,40 @@ func TestCreateOrUpdateJob(t *testing.T) {
 		}
 		if resp.ID != 123 {
 			t.Errorf("ID: got %d, want 123", resp.ID)
+		}
+	})
+
+	// M-3a: 2xx with a body that has no usable id is typed (ErrUnusableResponse) so Create
+	// can say the job may exist; the message text is unchanged for other callers.
+	t.Run("2xx with unusable body is ErrUnusableResponse", func(t *testing.T) {
+		for _, body := range []string{`{}`, `{"id":"x"}`, `not json`} {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(body))
+			}))
+			_, err := newTestClient(t, srv).CreateOrUpdateJob(context.Background(), &Job{Name: "test"})
+			srv.Close()
+			if err == nil || !errors.Is(err, ErrUnusableResponse) {
+				t.Errorf("body %q: err = %v, want ErrUnusableResponse", body, err)
+			}
+			if err != nil && !strings.HasPrefix(err.Error(), "error unmarshaling response: ") {
+				t.Errorf("body %q: message changed: %v", body, err)
+			}
+		}
+	})
+
+	t.Run("non-2xx and network errors are not ErrUnusableResponse", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{}`))
+		}))
+		_, err := newTestClient(t, srv).CreateOrUpdateJob(context.Background(), &Job{Name: "test"})
+		srv.Close()
+		if err == nil || errors.Is(err, ErrUnusableResponse) {
+			t.Errorf("500: err = %v, must be an ordinary error", err)
+		}
+		c := newTestClient(t, srv) // closed server
+		if _, err := c.CreateOrUpdateJob(context.Background(), &Job{Name: "test"}); err == nil || errors.Is(err, ErrUnusableResponse) {
+			t.Errorf("network: err = %v, must be an ordinary error", err)
 		}
 	})
 
@@ -291,6 +327,9 @@ func TestIsJobNotFound(t *testing.T) {
 		{"400 near miss: Invalid Job state", 400, `{"code":"Bad Request","message":"Invalid Job state"}`, false},
 		{"400 near miss: Invalid Data Store Id provided", 400, `{"code":"Bad Request","message":"Invalid Data Store Id provided"}`, false},
 		{"400 JSON with extra fields", 400, `{"code":"Bad Request","message":"Invalid Job Id provided","extra":1}`, true},
+		// encoding/json matches keys case-insensitively; values stay exact; BICC was only
+		// observed sending lower-case keys (A6). Pinned so a change of decoder is noticed.
+		{"400 upper-case keys match (encoding/json is case-insensitive for keys)", 400, `{"CODE":"Bad Request","Message":"Invalid Job Id provided"}`, true},
 		{"400 empty body", 400, ``, false},
 		{"400 non-JSON body", 400, `Invalid Job Id provided`, false},
 		{"400 non-JSON html", 400, `<html>Bad Request</html>`, false},
@@ -446,6 +485,25 @@ func TestDeleteJob(t *testing.T) {
 		}
 		assertNotTyped(t, err, 500)
 	})
+
+	// Only 200 and 204 are success (A5 observed 200). 201 and 202 are errors: a BICC 202
+	// ("accepted, still deleting") would NOT mean the job is gone, and would need a decision
+	// (poll? treat as success?) before this is relaxed.
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted} {
+		status := status
+		t.Run(fmt.Sprintf("%d is an untyped error, not success", status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			err := newTestClient(t, srv).DeleteJob(context.Background(), 7)
+			if err == nil {
+				t.Fatalf("expected error for %d on DELETE", status)
+			}
+			assertNotTyped(t, err, status)
+		})
+	}
 
 	t.Run("non-200/204 returns error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

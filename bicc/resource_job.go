@@ -2,6 +2,7 @@ package bicc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -265,6 +266,14 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 
 	jobResp, err := r.client.CreateOrUpdateJob(ctx, job)
 	if err != nil {
+		if errors.Is(err, client.ErrUnusableResponse) {
+			// 2xx but no usable id: the job may exist on BICC under the configured name.
+			resp.Diagnostics.AddError("Error creating job",
+				fmt.Sprintf("BICC accepted the PUT (HTTP 2xx) but returned no usable job id, so the job may "+
+					"exist on BICC under the configured name %q. Nothing was saved to state. "+
+					"Check BICC for a job with that name before re-running apply. Detail: %s", job.Name, err))
+			return
+		}
 		resp.Diagnostics.AddError("Error creating job", err.Error())
 		return
 	}
@@ -274,8 +283,9 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	// and write no state.
 	if jobResp.ID <= 0 {
 		resp.Diagnostics.AddError("Error creating job",
-			fmt.Sprintf("The PUT returned HTTP success but BICC returned an unusable id %d for the job. "+
-				"No state was saved and the job was not read back.", jobResp.ID))
+			fmt.Sprintf("The PUT returned HTTP success but BICC returned an unusable id %d for the job, so "+
+				"the job may exist on BICC under the configured name %q. "+
+				"Nothing was saved to state and the job was not read back.", jobResp.ID, job.Name))
 		return
 	}
 
@@ -294,10 +304,7 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	// Optional+Computed fields not set in config remain unknown after Create.
 	refreshed, err := r.client.GetJob(ctx, jobResp.ID)
 	if err != nil {
-		resp.Diagnostics.AddError("Error reading job after create",
-			fmt.Sprintf("The PUT succeeded: job %d exists on BICC, but reading it back failed: %s\n\n"+
-				"No state was saved. PUT upserts by name, so re-running apply re-sends the same job "+
-				"and converges on the same BICC job (no data loss).", jobResp.ID, err))
+		resp.Diagnostics.AddError("Error reading job after create", orphanReadBackDetail(jobResp.ID, err))
 		return
 	}
 
@@ -308,10 +315,11 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	newDataStores, diags := r.buildDataStoresFromAPI(ctx, refreshed.DataStores, oldByKey)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
+	if diags.HasError() {
+		resp.Diagnostics.AddError("Error processing job after create", orphanProcessingDetail(jobResp.ID, diags))
 		return
 	}
+	resp.Diagnostics.Append(diags...)
 
 	plan.Name = types.StringValue(refreshed.Name)
 	plan.Description = descriptionFromAPI(plan.Description, refreshed.Description)
@@ -336,6 +344,39 @@ func parseStateJobID(raw string, diags *diag.Diagnostics) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// orphanRetryAdvice is the shared tail of every Create error raised after BICC accepted the
+// PUT: nothing is in state, the job may be on BICC. The evidence for "the job exists" is only
+// a 2xx from the PUT, and same-name re-PUT convergence is unverified (ASSUMPTIONS A1), so the
+// text says "as far as reported" and tells the operator to check BICC first.
+func orphanRetryAdvice(jobID int64) string {
+	return fmt.Sprintf("No state was saved. Re-running apply sends the same job again; PUT upserts by name "+
+		"as far as reported (A1, unverified), so this should converge, but check BICC for job %d "+
+		"or the job name first.", jobID)
+}
+
+// orphanReadBackDetail words the Create error when the PUT was acknowledged but the GET
+// that follows failed. A typed not-found (the live 400, A6) is reported as "unknown (or not
+// visible)", never as verified absence or presence.
+func orphanReadBackDetail(jobID int64, err error) string {
+	if errors.Is(err, client.ErrNotFound) {
+		return fmt.Sprintf("BICC acknowledged the PUT with job id %d, but BICC answered that job %d is unknown "+
+			"(or not visible); it may not have been created.\n\n%s", jobID, jobID, orphanRetryAdvice(jobID))
+	}
+	return fmt.Sprintf("BICC acknowledged the PUT with job id %d, but reading the job back failed: %s\n\n%s",
+		jobID, err, orphanRetryAdvice(jobID))
+}
+
+// orphanProcessingDetail words the Create error when the PUT and the GET both succeeded
+// but turning the API answer into state failed. Same orphan caveat as orphanReadBackDetail.
+func orphanProcessingDetail(jobID int64, diags diag.Diagnostics) string {
+	var parts []string
+	for _, d := range diags.Errors() {
+		parts = append(parts, d.Summary()+": "+d.Detail())
+	}
+	return fmt.Sprintf("BICC acknowledged the PUT with job id %d and the job was read back, but its data could "+
+		"not be converted to state: %s\n\n%s", jobID, strings.Join(parts, "; "), orphanRetryAdvice(jobID))
 }
 
 func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -405,6 +446,13 @@ func (r *biccJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 	plan.ID = state.ID
 
+	// Validate the state id BEFORE any HTTP call (the PUT upserts by name and cannot be
+	// undone, and a bad id would only fail after it): same rule as Read and Delete (KI-5).
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
+		return
+	}
+
 	job, diags := r.buildJobFromModel(ctx, plan)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
@@ -418,12 +466,6 @@ func (r *biccJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	// Re-read from the API so state reflects server-normalized values.
-	jobID, err := strconv.ParseInt(plan.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID after update", err.Error())
-		return
-	}
-
 	refreshed, err := r.client.GetJob(ctx, jobID)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading job after update", err.Error())
