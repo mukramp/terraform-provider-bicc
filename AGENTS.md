@@ -15,7 +15,7 @@ A Python CLI (`bicc-job-cli`, sibling directory) creates and diffs BICC jobs fro
 The single live source is the task table in [docs/PLAN.md](docs/PLAN.md). Do not copy per-task status into other files. There is no GitHub issue tracker usage yet (no issues exist).
 
 What an agent must know now (refresh in the PR that changes it):
-- Tasks that are ready (no unverified API assumption behind them): 2 (import), 5 (read/delete safety), 6 (column lookup errors), 7 (tests), parts of 8 (examples, CI, LICENSE, `main.go` version).
+- Tasks that are ready (no unverified API assumption behind them): 2 (import), 5 (read/delete safety), 7 (tests), parts of 8 (examples, CI, LICENSE, `main.go` version). Task 6 (column lookup errors) is implemented on branch `fix/column-lookup-errors`, not merged.
 - Tasks 3, 4, 9 are blocked on live API checks A1 to A3 in [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md). Nobody has run any live check yet.
 - Open owner questions: [docs/DECISIONS.md](docs/DECISIONS.md) (Q2 distribution, Q5 pipeline behaviour, Q6 confirm decisions, Q7 task 1 commit).
 - Task 1 (credentials from env vars) is written in `bicc/provider.go` and `bicc/provider_test.go`; check `git log` for whether it is merged before assuming either way. It is not in the v3.0.0 tag.
