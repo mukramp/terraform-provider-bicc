@@ -779,7 +779,7 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 				if len(columns) == 0 {
 					diags.AddError(
 						"No columns selected for data store",
-						fmt.Sprintf("data_store_key %q has auto_populate_all_columns = true, but no columns remain after the lookup (BICC returned %d columns; none is default-selected or a primary key, or column_overrides deselect all of them). The job was not sent to BICC.",
+						fmt.Sprintf("data_store_key %q has auto_populate_all_columns = true, but no column remains populated after the lookup and column_overrides (BICC returned %d columns). The job was not sent to BICC.",
 							ds.DataStoreKey.ValueString(), len(allCols)),
 					)
 					continue

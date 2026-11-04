@@ -128,9 +128,14 @@ func autoDataStoreSet(t *testing.T, overrides map[string][]attr.Value, keys ...s
 
 func overrideDeselect(t *testing.T, name string) attr.Value {
 	t.Helper()
+	return overrideSetPopulate(t, name, false)
+}
+
+func overrideSetPopulate(t *testing.T, name string, populate bool) attr.Value {
+	t.Helper()
 	v, d := types.ObjectValue(columnOverrideAttrTypes, map[string]attr.Value{
 		"name":                    types.StringValue(name),
-		"is_populate":             types.BoolValue(false),
+		"is_populate":             types.BoolValue(populate),
 		"is_primary_key":          types.BoolNull(),
 		"is_last_update_date":     types.BoolNull(),
 		"is_creation_date":        types.BoolNull(),
@@ -298,6 +303,20 @@ func TestBuildJob_LookupSucceedsButZeroColumns_Errors(t *testing.T) {
 		}
 	})
 
+	t.Run("only a primary key with isPopulate=false (dropped by the later is_populate filter)", func(t *testing.T) {
+		body := `{"columns":[{"name":"ID","isPrimaryKey":true,"isPopulate":false}]}`
+		m := newMockBICC(t, map[string]mockReply{"Pk.Only": {http.StatusOK, body}})
+		job, diags := m.resource().buildJobFromModel(context.Background(), biccJobModel{
+			Name: types.StringValue("j"), DataStores: autoDataStoreSet(t, nil, "Pk.Only"),
+		})
+		if !diags.HasError() || job != nil {
+			t.Fatalf("expected error and nil job, got job=%v diags=%v", job, diags)
+		}
+		if !strings.Contains(errorText(diags), "no column remains populated") {
+			t.Errorf("message should state the real condition, got:\n%s", errorText(diags))
+		}
+	})
+
 	t.Run("no column is default-selected or primary key", func(t *testing.T) {
 		body := `{"columns":[{"name":"A","isPopulate":false},{"name":"B","isPopulate":false}]}`
 		m := newMockBICC(t, map[string]mockReply{"None.Selected": {http.StatusOK, body}})
@@ -392,6 +411,70 @@ func TestBuildJob_TwoBadKeysAmongGood_BothReported(t *testing.T) {
 		}
 		if n := m.putCount(); n != 0 {
 			t.Errorf("a job was PUT %d time(s); want 0", n)
+		}
+	})
+}
+
+// PRE-EXISTING behaviour, documented, not endorsed (KI-12). The comment in
+// buildJobFromModel says primary key columns are "always included regardless of
+// isPopulate", but the later "Remove columns deselected via overrides" loop
+// drops every column whose IsPopulate is false, including a primary key with
+// isPopulate=false, unless a column_override sets is_populate=true on it. These
+// tests pin the current behaviour so a future change is a conscious one.
+func TestBuildJob_PreExisting_PrimaryKeyWithIsPopulateFalse(t *testing.T) {
+	const body = `{"columns":[` +
+		`{"name":"ID","isPrimaryKey":true,"isPopulate":false},` +
+		`{"name":"NAME","isPopulate":true},` +
+		`{"name":"OTHER","isPopulate":false}]}`
+
+	names := func(job *client.Job) []string {
+		var out []string
+		for _, c := range job.DataStores[0].DataStoreMeta.Columns {
+			out = append(out, c.Name)
+		}
+		return out
+	}
+
+	t.Run("no override: pk with isPopulate=false is dropped", func(t *testing.T) {
+		m := newMockBICC(t, map[string]mockReply{"K": {http.StatusOK, body}})
+		job, diags := m.resource().buildJobFromModel(context.Background(), biccJobModel{
+			Name: types.StringValue("j"), DataStores: autoDataStoreSet(t, nil, "K"),
+		})
+		if diags.HasError() {
+			t.Fatalf("unexpected error: %v", diags)
+		}
+		if got := names(job); len(got) != 1 || got[0] != "NAME" {
+			t.Errorf("current behaviour: only NAME is sent, got %v", got)
+		}
+	})
+
+	t.Run("override is_populate=true on the pk keeps it", func(t *testing.T) {
+		m := newMockBICC(t, map[string]mockReply{"K": {http.StatusOK, body}})
+		job, diags := m.resource().buildJobFromModel(context.Background(), biccJobModel{
+			Name: types.StringValue("j"),
+			DataStores: autoDataStoreSet(t,
+				map[string][]attr.Value{"K": {overrideSetPopulate(t, "ID", true)}}, "K"),
+		})
+		if diags.HasError() {
+			t.Fatalf("unexpected error: %v", diags)
+		}
+		if got := names(job); len(got) != 2 || got[0] != "ID" || got[1] != "NAME" {
+			t.Errorf("want [ID NAME], got %v", got)
+		}
+	})
+
+	t.Run("override is_populate=true on a non-default, non-pk column has no effect", func(t *testing.T) {
+		m := newMockBICC(t, map[string]mockReply{"K": {http.StatusOK, body}})
+		job, diags := m.resource().buildJobFromModel(context.Background(), biccJobModel{
+			Name: types.StringValue("j"),
+			DataStores: autoDataStoreSet(t,
+				map[string][]attr.Value{"K": {overrideSetPopulate(t, "OTHER", true)}}, "K"),
+		})
+		if diags.HasError() {
+			t.Fatalf("unexpected error: %v", diags)
+		}
+		if got := names(job); len(got) != 1 || got[0] != "NAME" {
+			t.Errorf("current behaviour: OTHER is not added, got %v", got)
 		}
 	})
 }
