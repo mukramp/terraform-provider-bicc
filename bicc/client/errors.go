@@ -47,9 +47,11 @@ func IsNotFound(err error) bool {
 // missing job. A repeat DELETE of a missing id returns HTTP 200 (A5); DeleteJob does not use
 // this predicate, and any non-2xx DELETE is an error.
 //
-// The predicate is deliberately narrow and true only for: status 400, a JSON body whose
-// code is exactly "Bad Request" and whose message contains "invalid job id"
-// (case-insensitive). In particular:
+// The predicate is deliberately narrow and true only for: status 400 and a JSON body whose
+// code is exactly "Bad Request" and whose message, trimmed of surrounding whitespace, is
+// exactly "Invalid Job Id provided" (the only observed text; case-sensitive, no substring
+// match, so near misses such as "Invalid Job state" or "Invalid column" are errors). In
+// particular:
 //   - a bare 404 is never "job gone": a wrong host, port or proxy could answer 404 for
 //     every path, and Read would then drop every job from state (the plan would
 //     recreate them all);
@@ -70,5 +72,5 @@ func isJobNotFound(statusCode int, body []byte) bool {
 	if err := json.Unmarshal(body, &e); err != nil {
 		return false
 	}
-	return e.Code == "Bad Request" && strings.Contains(strings.ToLower(e.Message), "invalid job id")
+	return e.Code == "Bad Request" && strings.TrimSpace(e.Message) == "Invalid Job Id provided"
 }
