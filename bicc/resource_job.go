@@ -318,8 +318,10 @@ func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, re
 		// Any other failure (5xx, 401/403, network, bad JSON) must not be read as
 		// "deleted": removing state would make Terraform plan to recreate the job
 		// (KI-5). Leave state untouched and surface the error.
-		// What "does not exist" looks like on the wire is UNVERIFIED (ASSUMPTIONS A5/A6);
-		// see client.isJobNotFound.
+		// "Does not exist" is HTTP 400 {"code":"Bad Request","message":"Invalid Job Id
+		// provided"}, OBSERVED on SIT 2026-11-04 (ASSUMPTIONS A6); a bare 404 is NOT that.
+		// See client.isJobNotFound. OPEN RISK: the same 400 may also be returned for a job
+		// the account cannot see (permissions); unchecked.
 		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
@@ -425,10 +427,11 @@ func (r *biccJobResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	// Delete is idempotent: a job that is already gone counts as deleted. Any other
-	// failure is an error, and there are no retries (ASSUMPTIONS C2). Whether BICC
-	// supports DELETE at all, and what it returns for a missing job, is UNVERIFIED
-	// (A5/A6); see client.isJobNotFound.
+	// Delete is idempotent because BICC answers HTTP 200 for a repeat DELETE of a missing
+	// id (OBSERVED 2026-11-04, ASSUMPTIONS A5). The NotFoundError exemption below is
+	// DEFENSIVE (a DELETE has not been seen to return the GET not-found shape). Any other
+	// failure is an error, and there are no retries (ASSUMPTIONS C2). Deletes take about
+	// 2.5 minutes on SIT (A10), against the 300s client timeout.
 	if err := r.client.DeleteJob(ctx, jobID); err != nil && !client.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting job", err.Error())
 	}

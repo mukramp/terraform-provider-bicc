@@ -147,9 +147,11 @@ func (c *Client) CreateOrUpdateJob(ctx context.Context, job *Job) (*JobResponse,
 // GetJob retrieves a BICC job by ID.
 //
 // It returns a *NotFoundError (see IsNotFound) only when isJobNotFound says the
-// response means "this job does not exist". Every other failure (network error,
-// 401/403, 5xx, unparseable body) is returned as an ordinary error, so callers
-// can tell a missing job from a transient failure.
+// response means "this job does not exist": HTTP 400 with the JSON body
+// {"code":"Bad Request","message":"Invalid Job Id provided"} (OBSERVED 2026-11-04 on
+// SIT, ASSUMPTIONS A6). Every other failure (network error, any 404, other 400s,
+// 401/403, 5xx, unparseable body) is returned as an ordinary error, so callers can tell a
+// missing job from a transient failure.
 func (c *Client) GetJob(ctx context.Context, jobID int64) (*Job, error) {
 	path := fmt.Sprintf("/biacm/rest/meta/jobs/%d", jobID)
 
@@ -209,10 +211,15 @@ func (c *Client) GetDataStoreColumns(ctx context.Context, dataStoreKey string) (
 	return dataStore.Columns, nil
 }
 
-// DeleteJob deletes a BICC job (note: BICC API may not support DELETE, ASSUMPTIONS A5).
+// DeleteJob deletes a BICC job. DELETE works (OBSERVED 2026-11-04 on SIT, ASSUMPTIONS A5):
+// an existing job is removed (about 2.5 minutes, close to the 300s client timeout), and a
+// repeat DELETE of the now-missing id returns HTTP 200, so idempotency comes from BICC
+// itself, not from not-found handling.
 //
-// A missing job is reported as a *NotFoundError (see IsNotFound); the caller decides
-// whether that counts as success. No retries (ASSUMPTIONS C2).
+// The *NotFoundError branch below is DEFENSIVE: BICC has not been seen to answer a DELETE
+// with the GET not-found shape (400 "Invalid Job Id provided", see isJobNotFound), but if
+// it does, the caller may treat it as already deleted. A bare 404 is an ordinary error.
+// No retries (ASSUMPTIONS C2).
 func (c *Client) DeleteJob(ctx context.Context, jobID int64) error {
 	path := fmt.Sprintf("/biacm/rest/meta/jobs/%d", jobID)
 

@@ -29,7 +29,7 @@ Reference behaviour is the CLI. Mapping of CLI pieces to provider code (reported
 | 2 | Fix import | Not started | none |
 | 3 | Handle job rename safely | Not started. Blocked on check A1 | task 5, A1 |
 | 4 | Handle PUT response status | Not started. Blocked on check A2 | A2 |
-| 5 | Make Read and Delete safe | Implemented on branch `fix/safe-read-delete`, not merged, not released. Mock-tested only; the 404-means-missing assumption is unverified until A5/A6 are run (one predicate, `isJobNotFound`, to adjust). Needs independent review (yellow lane) | A5, A6 recommended first |
+| 5 | Make Read and Delete safe | Implemented on branch `fix/safe-read-delete`, not merged, not released. Mock-tested with the live shapes observed on SIT 2026-11-04 (A5, A6). Open risk: a permission-hidden job may also return 400 `Invalid Job Id` (unchecked). Needs independent re-review (yellow lane) | A5, A6 (observed) |
 | 6 | Stop swallowing column lookup errors | Not started | none |
 | 7 | Add tests | Not started | writes tests for 2 to 6 |
 | 8 | Clean up docs, examples, CI | Partial: README, `docs/index.md`, `docs/resources/job.md` corrected in the change that created this file. Open: `examples/main.tf`, CI, LICENSE, `main.go` version, `tfplugindocs` | none |
@@ -98,11 +98,11 @@ Before starting tasks 3, 4 and 9, run the checks in [ASSUMPTIONS.md](ASSUMPTIONS
 ### Task 5. Make Read and Delete safe
 - **Original plan:** decide what removing a job file does; suggested `prevent_destroy` or a provider-side `skip_delete`.
 - **Decision:** real deletion in all environments, so no `skip_delete` in the first version (DR-1).
-- **Current:** Read drops state on any error; Delete fails on 404 (KI-5).
-- **Change:** typed not-found error in the client; remove from state only on a real 404 and return an error for other failures; Delete treats 404 as success; no retries until rate limit and concurrent behaviour are known (ASSUMPTIONS C2).
+- **Current:** Read drops state on any error; Delete fails on anything but 200/204 (KI-5).
+- **Change:** typed not-found error in the client; remove from state only when BICC says the job does not exist and return an error for every other failure; no retries until rate limit and concurrent behaviour are known (ASSUMPTIONS C2). What BICC says for a missing job is **observed** (2026-11-04, SIT, A6): HTTP 400 `{"code":"Bad Request","message":"Invalid Job Id provided"}`. A bare 404 is NOT a missing job (plain-text 404 `Not Found` means a malformed id or a wrong host/proxy). A repeat DELETE of a missing id returns HTTP 200 (A5), so Delete is idempotent through the normal success path; the DeleteJob handling of 404/400-live-body is defensive only.
 - **Gives you:** transient API failures no longer make Terraform plan to recreate or drop a job, and deletes are idempotent. Because deletes run in prd, this is the main safety work in the provider.
-- **Implemented (branch `fix/safe-read-delete`):** `client.NotFoundError` plus `isJobNotFound` (HTTP 404 only) in `bicc/client/errors.go`; Read and Delete behave as described above; tests in `bicc/client/client_test.go` and `bicc/resource_job_readdelete_test.go`. `ImportState`, Create and Update also call `GetJob` and still error on any failure (not-found included), unchanged.
-- **Still open:** run A5 and A6, then adjust `isJobNotFound` (status and possibly a body marker) and its test table. Until then a missing job that BICC reports as 500 shows as a Read error, not as a dropped resource.
+- **Implemented (branch `fix/safe-read-delete`):** `client.NotFoundError` plus `isJobNotFound` (HTTP 400 and JSON `code == "Bad Request"` and `message` containing "invalid job id", case-insensitive; nothing else) in `bicc/client/errors.go`; Read and Delete behave as described above; live-shaped mock tests in `bicc/client/client_test.go` and `bicc/resource_job_readdelete_test.go` (Read through the plugin framework). `ImportState`, Create and Update also call `GetJob` and still error on any failure (not-found included), unchanged.
+- **Still open:** (1) whether BICC returns the same 400 `Invalid Job Id` for an existing job the account cannot see (permissions); if so Read drops that job from state and the plan recreates it, so check before prd. (2) Deletes take about 150s on SIT (A10) against the 300s HTTP client timeout: recommended separate yellow change, not done here. (3) Independent re-review, merge and release are separate steps; this is implemented on the branch only.
 
 ### Task 6. Stop swallowing column lookup errors
 - **Original plan:** `auto_populate_all_columns` needs a live lookup, resolved in plan (`ModifyPlan`) or modelled as computed to avoid "inconsistent result after apply".

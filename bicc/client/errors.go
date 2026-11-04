@@ -12,7 +12,8 @@ import (
 var ErrNotFound = errors.New("not found")
 
 // NotFoundError means the BICC API answered that the job does not exist, as decided
-// by isJobNotFound. It is returned by GetJob and DeleteJob and by nothing else.
+// by isJobNotFound (HTTP 400 "Invalid Job Id provided", observed on SIT 2026-11-04, A6).
+// It is returned by GetJob and DeleteJob and by nothing else.
 // Network errors, auth errors, 5xx and unparseable bodies are never NotFoundError.
 type NotFoundError struct {
 	JobID      int64
