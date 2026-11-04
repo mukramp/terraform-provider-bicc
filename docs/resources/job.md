@@ -145,9 +145,20 @@ data_stores = [
 terraform import bicc_job.example 123456789
 ```
 
-~> **Known issue:** import currently produces a state with no `data_stores` (the provider drops every data store that is not already in state), so the first `terraform plan` after an import will show the data stores as changes to add. Review that plan before applying. Tracked as KI-2 in the repository's `docs/KNOWN-ISSUES.md`.
+~> **Status:** import by numeric job ID is implemented on the branch `fix/import-data-stores`; it is not merged and not released. It is tested with mocks only; a real `terraform import` followed by `terraform plan` has not been run yet (`docs/ASSUMPTIONS.md` B1). Tracked as KI-2 in `docs/KNOWN-ISSUES.md`.
 
-After importing, run `terraform plan` and read it carefully.
+The ID must be the positive numeric BICC job ID. A non-numeric, zero or negative ID, or an ID that BICC says does not exist, makes the import fail with an error and nothing is stored in state.
+
+Import brings in **all** data stores of the job as BICC returns them, in explicit-column mode: `auto_populate_all_columns = false`, `column_overrides = []`, and `columns` set to the columns BICC has for that data store (all other fields come from BICC too). This means the first plan does not need a column lookup.
+
+**Write the configuration to match the imported state**, then run `terraform plan` and read it carefully:
+
+- Use the same `name` as the BICC job. A different name makes the next apply PUT under that name, which may create another job instead of renaming (KI-3, unverified).
+- List the same data stores with the same `columns` (explicit mode). The easiest way is to copy them from `terraform state show` or `terraform show` after the import.
+- A config that sets `auto_populate_all_columns = true` (columns resolved at apply time) does not match the imported state (`false` with explicit columns). Expect it to differ from the imported state; whether the plan shows the difference or the provider's `ModifyPlan` suppresses it has not been checked against Terraform itself. An apply from such a config re-sends the auto-populated column set.
+- Data stores on BICC that the config omits appear as removals; data stores in the config that BICC does not have appear as additions.
+- `description` and `filters` can show a difference between `""` and unset (unchecked).
+- `lastExtractDate`, `isFlexDataStore`, `groupNumber` and `groupItemPriority` are not part of the resource. The provider sends `groupNumber = 0`, `groupItemPriority = 0` and no `lastExtractDate` when it updates a job. Whether that changes anything on BICC for an imported job has not been checked: do not apply to an imported job you care about until it has been checked on SIT.
 
 ## Schema
 
