@@ -641,3 +641,79 @@ func TestPlanAfterImportStillShowsRealChanges(t *testing.T) {
 		t.Error("plan equals state although the config changed")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Empty import (review MINOR-2). A 200 that carries no job (`{}`, `null`, or a body with
+// no name) would otherwise import a nameless job: state with name "", no data stores.
+// The next apply from a matching config would then PUT that job's data over whatever
+// BICC holds. ImportState must refuse. A job WITH a name and no data stores is a legal
+// job and must still import.
+// ---------------------------------------------------------------------------
+
+func TestImportRejectsAnAPIAnswerWithoutAJobName(t *testing.T) {
+	bodies := map[string]string{
+		"200 {}":                        `{}`,
+		"200 null":                      `null`,
+		"200 only description null":     `{"description":null}`,
+		"200 empty name":                `{"name":"","dataStores":[]}`,
+		"200 name null":                 `{"name":null,"description":"x","dataStores":[]}`,
+		"200 data stores but no name":   `{"dataStores":[{"dataStoreMeta":{"dataStoreKey":"A.B.C","columns":[]}}]}`,
+		"200 empty array (wrong shape)": `[]`,
+	}
+	for name, body := range bodies {
+		name, body := name, body
+		t.Run(name, func(t *testing.T) {
+			r, _ := newMockedResource(t, jobGetHandler(t, body))
+			resp := runImport(t, r, "4242")
+			if name == "200 empty array (wrong shape)" {
+				// Not a JSON object: fails to decode, which is an error too.
+				if !resp.Diagnostics.HasError() || !resp.State.Raw.IsNull() {
+					t.Fatalf("expected an error and empty state, got %v / null=%v", resp.Diagnostics, resp.State.Raw.IsNull())
+				}
+				return
+			}
+			if !resp.Diagnostics.HasError() {
+				t.Fatalf("expected an error diagnostic, state: %v", resp.State.Raw)
+			}
+			if !resp.State.Raw.IsNull() {
+				t.Error("state must stay empty")
+			}
+			var msg string
+			for _, d := range resp.Diagnostics.Errors() {
+				msg += d.Summary() + " " + d.Detail()
+			}
+			if !strings.Contains(msg, "BICC returned a job without a name for id 4242; not importing") {
+				t.Errorf("unexpected message: %s", msg)
+			}
+		})
+	}
+}
+
+// A job with a name and zero data stores is legitimate (data_stores = [] is a valid
+// config, KI-8): import succeeds with an empty, known data_stores set.
+func TestImportAcceptsANamedJobWithoutDataStores(t *testing.T) {
+	r, _ := newMockedResource(t, jobGetHandler(t, `{"name":"EMPTY_JOB","description":"d","schedules":null,"dataStores":[]}`))
+	imp, rd := importThenRead(t, r, "4242")
+	if imp.Diagnostics.HasError() || rd.Diagnostics.HasError() {
+		t.Fatalf("import/read: %v %v", imp.Diagnostics, rd.Diagnostics)
+	}
+	for name, s := range map[string]tfsdk.State{"ImportState": imp.State, "Read after import": rd.State} {
+		m := modelOf(t, s)
+		if m.Name.ValueString() != "EMPTY_JOB" || m.ID.ValueString() != "4242" {
+			t.Errorf("%s: unexpected id/name: %q %q", name, m.ID.ValueString(), m.Name.ValueString())
+		}
+		if m.DataStores.IsNull() || m.DataStores.IsUnknown() || len(m.DataStores.Elements()) != 0 {
+			t.Errorf("%s: data_stores = %v, want a known empty set", name, m.DataStores)
+		}
+	}
+
+	// Same with the dataStores key missing altogether (decodes to a nil slice).
+	r2, _ := newMockedResource(t, jobGetHandler(t, `{"name":"EMPTY_JOB"}`))
+	imp2 := runImport(t, r2, "4242")
+	if imp2.Diagnostics.HasError() {
+		t.Fatalf("import without dataStores key: %v", imp2.Diagnostics)
+	}
+	if ds := modelOf(t, imp2.State).DataStores; ds.IsNull() || len(ds.Elements()) != 0 {
+		t.Errorf("data_stores = %v, want a known empty set", ds)
+	}
+}

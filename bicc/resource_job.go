@@ -514,6 +514,18 @@ func (r *biccJobResource) ImportState(ctx context.Context, req resource.ImportSt
 		return
 	}
 
+	// A 200 that carries no job (`{}`, `null`, `{"description":null}`) decodes to a zero Job.
+	// Importing it would store a nameless job with no data stores; a matching config would
+	// then PUT over whatever BICC holds. A job without data stores is fine (data_stores = []
+	// is valid), a job without a name is not.
+	if job.Name == "" {
+		resp.Diagnostics.AddError(
+			"Job to import has no name",
+			fmt.Sprintf("BICC returned a job without a name for id %d; not importing. Nothing was imported. Check the ID and the BICC instance (host) the provider is configured for.", jobID),
+		)
+		return
+	}
+
 	newDataStores, diags := r.buildDataStoresFromAPIMode(ctx, job.DataStores, map[string]dataStoreModel{}, true)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
