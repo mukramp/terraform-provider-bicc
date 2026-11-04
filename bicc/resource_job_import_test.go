@@ -436,6 +436,9 @@ func TestImportFailuresLeaveNoState(t *testing.T) {
 			if !resp.State.Raw.IsNull() {
 				t.Error("state must stay empty when import fails")
 			}
+			if got := resp.Diagnostics[0].Summary(); got != tc.wantTitle {
+				t.Errorf("diagnostic title = %q, want %q", got, tc.wantTitle)
+			}
 			msg := resp.Diagnostics[0].Summary() + " " + resp.Diagnostics[0].Detail()
 			if !strings.Contains(msg, tc.want) {
 				t.Errorf("diagnostic %q does not mention %q", msg, tc.want)
@@ -807,6 +810,35 @@ func TestImportWithDuplicateDataStoreKeysErrorsWithoutState(t *testing.T) {
 			}
 			if !strings.Contains(d.Detail(), "4242") || !strings.Contains(d.Detail(), "A.B.C") {
 				t.Errorf("message does not name the job id and the key: %q", d.Detail())
+			}
+		})
+	}
+}
+
+// descriptionFromAPI called directly (final remediation round, item 5b). An unknown prior
+// value cannot reach it in practice: description is Optional and not Computed, so it is
+// unknown in a plan only when the config value is unknown at plan time, and Create and
+// Update run at apply time when config values are known; Read and ImportState pass state
+// or null. The helper must still not turn an unknown prior into null, so this pins it.
+func TestDescriptionFromAPI(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		prior types.String
+		api   string
+		want  types.String
+	}{
+		{"null prior, empty API: null", types.StringNull(), "", types.StringNull()},
+		{"null prior, API value: API value", types.StringNull(), "x", types.StringValue("x")},
+		{"empty prior, empty API: empty", types.StringValue(""), "", types.StringValue("")},
+		{"value prior, empty API: empty (drift is shown)", types.StringValue("x"), "", types.StringValue("")},
+		{"value prior, other API value: API value", types.StringValue("x"), "y", types.StringValue("y")},
+		{"unknown prior, empty API: empty, not null", types.StringUnknown(), "", types.StringValue("")},
+		{"unknown prior, API value: API value", types.StringUnknown(), "y", types.StringValue("y")},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := descriptionFromAPI(tc.prior, tc.api); !got.Equal(tc.want) {
+				t.Errorf("descriptionFromAPI(%s, %q) = %s, want %s", tc.prior, tc.api, got, tc.want)
 			}
 		})
 	}
