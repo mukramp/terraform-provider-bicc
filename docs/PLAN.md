@@ -30,7 +30,7 @@ Reference behaviour is the CLI. Mapping of CLI pieces to provider code (reported
 | 3 | Handle job rename safely | Not started. Blocked on check A1 | task 5, A1 |
 | 4 | Handle PUT response status | Not started. Blocked on check A2 | A2 |
 | 5 | Make Read and Delete safe | Not started | A5, A6 recommended first |
-| 6 | Stop swallowing column lookup errors | Not started | none |
+| 6 | Stop swallowing column lookup errors | Implemented on branch `fix/column-lookup-errors`, not merged, not released. Mock-server tests only; not run against live BICC | none |
 | 7 | Add tests | Not started | writes tests for 2 to 6 |
 | 8 | Clean up docs, examples, CI | Partial: README, `docs/index.md`, `docs/resources/job.md` corrected in the change that created this file. Open: `examples/main.tf`, CI, LICENSE, `main.go` version, `tfplugindocs` | none |
 | 9 | Data source and lookup by name | Not started. Blocked on check A3 | A3 |
@@ -107,6 +107,8 @@ Before starting tasks 3, 4 and 9, run the checks in [ASSUMPTIONS.md](ASSUMPTIONS
 - **Current:** lookup at apply time, errors swallowed, key not URL-escaped (KI-6).
 - **Change:** return the error and fail the apply; URL-escape the key; keep the lookup at apply time (a plan-time lookup would need live API access for every plan).
 - **Gives you:** no job is silently sent with zero columns. This is the one failure that can damage a production job without any error.
+- **Done (branch `fix/column-lookup-errors`, not merged):** `buildJobFromModel` returns an error diagnostic naming the `data_store_key` and the underlying error when the lookup fails, and builds no job, so no PUT is sent. A lookup that succeeds but leaves zero columns (BICC returns none, none is default-selected or a primary key, or `column_overrides` deselect all) is an error too (decision made in this task, not owner-confirmed). `GetDataStoreColumns` escapes the key with `url.PathEscape`; its error includes HTTP status and body (a missing key is a 500, A9). Tests: client `httptest` cases, and Create/Update through the resource with a mock server asserting an error and zero PUTs.
+- **Not done:** no live check. Whether the live API accepts an escaped key with special characters is unverified (A8); keys seen so far contain only letters and dots, which escaping leaves unchanged.
 
 ### Task 7. Add tests
 - **Original plan:** `httptest` unit tests ported from the CLI; acceptance tests (`TF_ACC`) against sit.

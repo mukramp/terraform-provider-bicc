@@ -183,7 +183,7 @@ After importing, run `terraform plan` and read it carefully.
 - `chunk_date_seq_incr` (Number) - Date sequence increment for chunking (e.g., `7` for weekly chunks). Default: `0`.
 - `chunk_date_seq_min` (Number) - Minimum date sequence for chunking. Default: `0`.
 - `chunk_pk_seq_incr` (Number) - Primary key sequence increment for chunking. Default: `0`.
-- `auto_populate_all_columns` (Boolean) - If `true`, automatically fetch and include all available columns from the data store. Use `column_overrides` to mark specific columns (e.g., `LastUpdateDate`) for incremental tracking. Default: `false`.
+- `auto_populate_all_columns` (Boolean) - If `true`, automatically fetch and include all available columns from the data store. Use `column_overrides` to mark specific columns (e.g., `LastUpdateDate`) for incremental tracking. Default: `false`. The column lookup happens at apply time; if it fails (for example the data store key does not exist, which BICC reports as HTTP 500), or leaves no columns, the apply fails with an error naming the `data_store_key` and no job is sent.
 - `column_overrides` (List of Objects) - Column overrides applied when `auto_populate_all_columns = true`. Set to `[]` if unused. See [column_overrides](#nested-schema-for-data_storescolumn_overrides) below.
 - `columns` (Set of Objects) - Manual column configuration. Use when `auto_populate_all_columns = false`. Set to `[]` if unused. See [columns](#nested-schema-for-data_storescolumns) below.
 
