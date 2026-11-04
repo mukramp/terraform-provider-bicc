@@ -291,6 +291,11 @@ func TestIsJobNotFound(t *testing.T) {
 		{"400 code in other case", 400, `{"code":"bad request","message":"Invalid Job Id provided"}`, false},
 		{"400 JSON without message", 400, `{"code":"Bad Request"}`, false},
 		{"400 JSON without code", 400, `{"message":"Invalid Job Id provided"}`, false},
+		{"400 truncated JSON", 400, `{"code":"Bad Request","message":"Invalid Job Id provided"`, false},
+		{"400 message of wrong type", 400, `{"code":"Bad Request","message":42}`, false},
+		// Strict parse: a body that json.Unmarshal reports an error for is never "job gone",
+		// even if the fields we look for were filled before the error (duplicate key).
+		{"400 duplicate message key, second of wrong type", 400, `{"code":"Bad Request","message":"Invalid Job Id provided","message":5}`, false},
 		{"400 JSON array", 400, `[{"code":"Bad Request","message":"Invalid Job Id provided"}]`, false},
 		{"400 JSON null", 400, `null`, false},
 		{"500 with the live body", 500, liveMissingJobBody, false},
