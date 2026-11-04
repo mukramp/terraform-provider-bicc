@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
@@ -176,12 +177,16 @@ func (c *Client) GetJob(ctx context.Context, jobID int64) (*Job, error) {
 }
 
 // GetDataStoreColumns fetches all available columns for a data store.
+//
+// The key is URL-path-escaped. A key that does not exist is reported by BICC as
+// HTTP 500 with a JSON body (observed, docs/ASSUMPTIONS.md A9), not 404, so any
+// non-200 status is returned as an error that carries the status and the body.
 func (c *Client) GetDataStoreColumns(ctx context.Context, dataStoreKey string) ([]Column, error) {
-	path := fmt.Sprintf("/biacm/rest/meta/datastores/%s", dataStoreKey)
+	path := "/biacm/rest/meta/datastores/" + url.PathEscape(dataStoreKey)
 
 	resp, err := c.doRequestWithContext(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error getting data store columns: %v", err)
+		return nil, fmt.Errorf("error getting data store columns for %q: %v", dataStoreKey, err)
 	}
 	defer resp.Body.Close()
 

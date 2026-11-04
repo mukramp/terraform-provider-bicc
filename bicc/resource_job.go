@@ -702,7 +702,15 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 			result := prefetch[ds.DataStoreKey.ValueString()]
 			allCols, err := result.cols, result.err
 			if err != nil {
-				columns = []client.Column{}
+				// Never fall back to zero columns: that would PUT a job with an
+				// empty column list (KI-6). BICC reports a missing key as HTTP
+				// 500 (ASSUMPTIONS A9); the client error carries status and body.
+				diags.AddError(
+					"Error looking up columns for data store",
+					fmt.Sprintf("Could not fetch the column metadata for data_store_key %q (auto_populate_all_columns = true), so the job was not sent to BICC: %s",
+						ds.DataStoreKey.ValueString(), err),
+				)
+				continue
 			} else {
 				// Use only BICC's default-selected columns (isPopulate=true in meta),
 				// matching the BICC UI default selection behaviour. This avoids
@@ -761,6 +769,17 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 					}
 				}
 				columns = kept
+
+				// A lookup that succeeds but leaves no columns would also PUT a
+				// job without columns. Treat it as an error as well.
+				if len(columns) == 0 {
+					diags.AddError(
+						"No columns selected for data store",
+						fmt.Sprintf("data_store_key %q has auto_populate_all_columns = true, but no columns remain after the lookup (BICC returned %d columns; none is default-selected or a primary key, or column_overrides deselect all of them). The job was not sent to BICC.",
+							ds.DataStoreKey.ValueString(), len(allCols)),
+					)
+					continue
+				}
 			}
 		} else {
 			var colModels []columnModel
@@ -817,6 +836,12 @@ func (r *biccJobResource) buildJobFromModel(ctx context.Context, model biccJobMo
 			GroupNumber:       0,
 			GroupItemPriority: 0,
 		}
+	}
+
+	// Any error above (failed lookup, empty column result) means no job is built,
+	// so callers cannot PUT a partial or column-less job.
+	if diags.HasError() {
+		return nil, diags
 	}
 
 	job.DataStores = dataStores
