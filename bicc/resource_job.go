@@ -2,6 +2,7 @@ package bicc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -294,10 +295,7 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	// Optional+Computed fields not set in config remain unknown after Create.
 	refreshed, err := r.client.GetJob(ctx, jobResp.ID)
 	if err != nil {
-		resp.Diagnostics.AddError("Error reading job after create",
-			fmt.Sprintf("The PUT succeeded: job %d exists on BICC, but reading it back failed: %s\n\n"+
-				"No state was saved. PUT upserts by name, so re-running apply re-sends the same job "+
-				"and converges on the same BICC job (no data loss).", jobResp.ID, err))
+		resp.Diagnostics.AddError("Error reading job after create", orphanReadBackDetail(jobResp.ID, err))
 		return
 	}
 
@@ -336,6 +334,28 @@ func parseStateJobID(raw string, diags *diag.Diagnostics) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// orphanRetryAdvice is the shared tail of every Create error raised after BICC accepted the
+// PUT: nothing is in state, the job may be on BICC. The evidence for "the job exists" is only
+// a 2xx from the PUT, and same-name re-PUT convergence is unverified (ASSUMPTIONS A1), so the
+// text says "as far as reported" and tells the operator to check BICC first.
+func orphanRetryAdvice(jobID int64) string {
+	return fmt.Sprintf("No state was saved. Re-running apply sends the same job again; PUT upserts by name "+
+		"as far as reported (A1, unverified), so this should converge, but check BICC for job %d "+
+		"or the job name first.", jobID)
+}
+
+// orphanReadBackDetail words the Create error when the PUT was acknowledged but the GET
+// that follows failed. A typed not-found (the live 400, A6) is reported as "unknown (or not
+// visible)", never as verified absence or presence.
+func orphanReadBackDetail(jobID int64, err error) string {
+	if errors.Is(err, client.ErrNotFound) {
+		return fmt.Sprintf("BICC acknowledged the PUT with job id %d, but BICC answered that job %d is unknown "+
+			"(or not visible); it may not have been created.\n\n%s", jobID, jobID, orphanRetryAdvice(jobID))
+	}
+	return fmt.Sprintf("BICC acknowledged the PUT with job id %d, but reading the job back failed: %s\n\n%s",
+		jobID, err, orphanRetryAdvice(jobID))
 }
 
 func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {

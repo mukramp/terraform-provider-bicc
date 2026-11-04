@@ -390,9 +390,32 @@ func TestCreateLeavesStateEmptyWhenReReadFails(t *testing.T) {
 			for _, d := range resp.Diagnostics.Errors() {
 				msg += d.Summary() + " " + d.Detail()
 			}
-			for _, want := range []string{"555", "exists on BICC", "upserts by name", "re-sends the same job", "no data loss"} {
+			// M-1: the only evidence is a 2xx from the PUT, so the message must not claim
+			// the job "exists" or that there is "no data loss"; A1 (same-name re-PUT) is unverified.
+			wants := []string{
+				"BICC acknowledged the PUT with job id 555",
+				"No state was saved",
+				"Re-running apply sends the same job again",
+				"PUT upserts by name as far as reported (A1, unverified)",
+				"should converge, but check BICC for job 555 or the job name first",
+			}
+			notWants := []string{"exists on BICC", "no data loss", "no longer", "job 555 not found"}
+			if tc.status == http.StatusBadRequest {
+				// the live 400 body is typed not-found by the client: not "verified gone"
+				wants = append(wants, "BICC answered that job 555 is unknown (or not visible); it may not have been created")
+				notWants = append(notWants, "reading the job back failed: job")
+			} else {
+				wants = append(wants, "reading the job back failed: ")
+				notWants = append(notWants, "unknown (or not visible)")
+			}
+			for _, want := range wants {
 				if !strings.Contains(msg, want) {
 					t.Errorf("error message lacks %q: %s", want, msg)
+				}
+			}
+			for _, nw := range notWants {
+				if strings.Contains(msg, nw) {
+					t.Errorf("error message must not contain %q: %s", nw, msg)
 				}
 			}
 			if got := atomic.LoadInt32(&puts); got != 1 {
