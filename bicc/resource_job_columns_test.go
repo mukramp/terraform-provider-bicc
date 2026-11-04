@@ -32,6 +32,7 @@ type mockBICC struct {
 	mu      sync.Mutex
 	puts    int
 	lookups map[string]mockReply
+	gets    []string // keys of every datastore lookup, in arrival order
 }
 
 type mockReply struct {
@@ -52,6 +53,7 @@ func newMockBICC(t *testing.T, lookups map[string]mockReply) *mockBICC {
 			w.Write([]byte(`{"id":"7","status":"SUCCESS"}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/biacm/rest/meta/datastores/"):
 			key := strings.TrimPrefix(r.URL.Path, "/biacm/rest/meta/datastores/")
+			m.gets = append(m.gets, key)
 			rep, ok := m.lookups[key]
 			if !ok {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -76,6 +78,12 @@ func (m *mockBICC) putCount() int {
 	return m.puts
 }
 
+func (m *mockBICC) lookupKeys() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.gets...)
+}
+
 func (m *mockBICC) resource() *biccJobResource {
 	c := client.NewClient(&client.Config{Host: "unused", Username: "u", Password: "p", Port: 0})
 	c.BaseURL = m.srv.URL
@@ -89,41 +97,73 @@ func okColumnsBody() string {
 		`{"name":"HIDDEN","isPopulate":false}]}`
 }
 
+// dataStoreObject builds one data_stores element. auto selects
+// auto_populate_all_columns; explicit holds the manual columns (used when auto
+// is false).
+func dataStoreObject(t *testing.T, key string, auto bool, overrides []attr.Value, explicit []attr.Value) attr.Value {
+	t.Helper()
+	if overrides == nil {
+		overrides = []attr.Value{}
+	}
+	if explicit == nil {
+		explicit = []attr.Value{}
+	}
+	obj, d := types.ObjectValue(dataStoreAttrTypes, map[string]attr.Value{
+		"data_store_key":             types.StringValue(key),
+		"filters":                    types.StringValue(""),
+		"is_silent_error":            types.BoolValue(false),
+		"is_effective_date_disabled": types.BoolValue(false),
+		"use_union_for_incremental":  types.BoolValue(false),
+		"initial_extract_date":       types.StringNull(),
+		"chunk_type":                 types.StringNull(),
+		"chunk_date_seq_incr":        types.Int64Value(0),
+		"chunk_date_seq_min":         types.Int64Value(0),
+		"chunk_pk_seq_incr":          types.Int64Value(0),
+		"auto_populate_all_columns":  types.BoolValue(auto),
+		"column_overrides":           types.ListValueMust(types.ObjectType{AttrTypes: columnOverrideAttrTypes}, overrides),
+		"columns":                    types.SetValueMust(types.ObjectType{AttrTypes: columnAttrTypes}, explicit),
+	})
+	if d.HasError() {
+		t.Fatalf("building test object: %v", d)
+	}
+	return obj
+}
+
+func dataStoreSet(t *testing.T, objs ...attr.Value) types.Set {
+	t.Helper()
+	s, d := types.SetValue(types.ObjectType{AttrTypes: dataStoreAttrTypes}, objs)
+	if d.HasError() {
+		t.Fatalf("building test set: %v", d)
+	}
+	return s
+}
+
 // autoDataStoreSet builds data_stores with auto_populate_all_columns = true for
 // the given keys.
 func autoDataStoreSet(t *testing.T, overrides map[string][]attr.Value, keys ...string) types.Set {
 	t.Helper()
 	objs := make([]attr.Value, len(keys))
 	for i, k := range keys {
-		ov := overrides[k]
-		if ov == nil {
-			ov = []attr.Value{}
-		}
-		obj, d := types.ObjectValue(dataStoreAttrTypes, map[string]attr.Value{
-			"data_store_key":             types.StringValue(k),
-			"filters":                    types.StringValue(""),
-			"is_silent_error":            types.BoolValue(false),
-			"is_effective_date_disabled": types.BoolValue(false),
-			"use_union_for_incremental":  types.BoolValue(false),
-			"initial_extract_date":       types.StringNull(),
-			"chunk_type":                 types.StringNull(),
-			"chunk_date_seq_incr":        types.Int64Value(0),
-			"chunk_date_seq_min":         types.Int64Value(0),
-			"chunk_pk_seq_incr":          types.Int64Value(0),
-			"auto_populate_all_columns":  types.BoolValue(true),
-			"column_overrides":           types.ListValueMust(types.ObjectType{AttrTypes: columnOverrideAttrTypes}, ov),
-			"columns":                    types.SetValueMust(types.ObjectType{AttrTypes: columnAttrTypes}, []attr.Value{}),
-		})
-		if d.HasError() {
-			t.Fatalf("building test object: %v", d)
-		}
-		objs[i] = obj
+		objs[i] = dataStoreObject(t, k, true, overrides[k], nil)
 	}
-	s, d := types.SetValue(types.ObjectType{AttrTypes: dataStoreAttrTypes}, objs)
+	return dataStoreSet(t, objs...)
+}
+
+func explicitColumn(t *testing.T, name string, populate bool) attr.Value {
+	t.Helper()
+	v, d := types.ObjectValue(columnAttrTypes, map[string]attr.Value{
+		"name":                    types.StringValue(name),
+		"is_populate":             types.BoolValue(populate),
+		"is_primary_key":          types.BoolValue(false),
+		"is_last_update_date":     types.BoolValue(false),
+		"is_creation_date":        types.BoolValue(false),
+		"is_effective_start_date": types.BoolValue(false),
+		"is_natural_key":          types.BoolValue(false),
+	})
 	if d.HasError() {
-		t.Fatalf("building test set: %v", d)
+		t.Fatalf("building explicit column: %v", d)
 	}
-	return s
+	return v
 }
 
 func overrideDeselect(t *testing.T, name string) attr.Value {
@@ -477,4 +517,66 @@ func TestBuildJob_PreExisting_PrimaryKeyWithIsPopulateFalse(t *testing.T) {
 			t.Errorf("current behaviour: OTHER is not added, got %v", got)
 		}
 	})
+}
+
+// MINOR-4: lookups happen only for auto_populate_all_columns stores. An
+// explicit-columns store must not trigger any GetDataStoreColumns request.
+func TestBuildJob_ExplicitColumns_NoLookup(t *testing.T) {
+	m := newMockBICC(t, nil)
+	set := dataStoreSet(t, dataStoreObject(t, "Explicit.Key", false, nil,
+		[]attr.Value{explicitColumn(t, "ID", true), explicitColumn(t, "NAME", true)}))
+
+	job, diags := m.resource().buildJobFromModel(context.Background(), biccJobModel{
+		Name: types.StringValue("j"), DataStores: set,
+	})
+	if diags.HasError() {
+		t.Fatalf("unexpected error: %v", diags)
+	}
+	if got := m.lookupKeys(); len(got) != 0 {
+		t.Errorf("auto_populate_all_columns=false must not look up columns, got lookups for %v", got)
+	}
+	if cols := job.DataStores[0].DataStoreMeta.Columns; len(cols) != 2 || cols[0].Name == cols[1].Name {
+		t.Errorf("explicit columns must be sent as configured, got %+v", cols)
+	}
+}
+
+func TestBuildJob_MixedAutoAndExplicit_LooksUpOnlyAuto(t *testing.T) {
+	m := newMockBICC(t, map[string]mockReply{"Auto.Key": {http.StatusOK, okColumnsBody()}})
+	set := dataStoreSet(t,
+		dataStoreObject(t, "Auto.Key", true, nil, nil),
+		dataStoreObject(t, "Explicit.Key", false, nil, []attr.Value{explicitColumn(t, "X", true)}),
+	)
+	job, diags := m.resource().buildJobFromModel(context.Background(), biccJobModel{
+		Name: types.StringValue("j"), DataStores: set,
+	})
+	if diags.HasError() {
+		t.Fatalf("unexpected error: %v", diags)
+	}
+	got := m.lookupKeys()
+	if len(got) != 1 || got[0] != "Auto.Key" {
+		t.Errorf("want exactly one lookup, for Auto.Key; got %v", got)
+	}
+	if len(job.DataStores) != 2 {
+		t.Fatalf("want 2 data stores, got %d", len(job.DataStores))
+	}
+}
+
+// An auto=false store with columns = [] is sent as is (zero columns). This is
+// existing behaviour that task 6 does not change; pinned so the PLAN/KI-6 claim
+// stays accurate.
+func TestBuildJob_ExplicitEmptyColumns_SentAsIs(t *testing.T) {
+	m := newMockBICC(t, nil)
+	set := dataStoreSet(t, dataStoreObject(t, "Explicit.Empty", false, nil, nil))
+	job, diags := m.resource().buildJobFromModel(context.Background(), biccJobModel{
+		Name: types.StringValue("j"), DataStores: set,
+	})
+	if diags.HasError() {
+		t.Fatalf("unexpected error: %v", diags)
+	}
+	if n := len(job.DataStores[0].DataStoreMeta.Columns); n != 0 {
+		t.Errorf("current behaviour: zero columns sent as is, got %d", n)
+	}
+	if got := m.lookupKeys(); len(got) != 0 {
+		t.Errorf("no lookup expected, got %v", got)
+	}
 }
