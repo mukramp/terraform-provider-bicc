@@ -160,22 +160,43 @@ func TestGetJob(t *testing.T) {
 		}
 	})
 
-	t.Run("404 returns typed not-found error", func(t *testing.T) {
+	// OBSERVED 2026-11-04 on SIT (ASSUMPTIONS A6): a missing numeric id is HTTP 400 with
+	// liveMissingJobBody.
+	t.Run("400 Invalid Job Id (live shape) returns typed not-found error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(liveMissingJobBody))
 		}))
 		defer srv.Close()
 
 		c := newTestClient(t, srv)
 		_, err := c.GetJob(context.Background(), 999)
 		if err == nil {
-			t.Fatal("expected error for 404")
+			t.Fatal("expected error for 400 Invalid Job Id")
 		}
-		assertNotFound(t, err, 999, http.MethodGet, http.StatusNotFound)
+		assertNotFound(t, err, 999, http.MethodGet, http.StatusBadRequest)
 	})
 
-	t.Run("non-404 failures return an untyped error", func(t *testing.T) {
-		for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusUnauthorized, http.StatusForbidden, http.StatusBadRequest} {
+	// OBSERVED 2026-11-04 (A6): a non-numeric or overflowing id gets a plain-text 404
+	// from the routing layer. That is NOT a missing job.
+	t.Run("404 Not Found (live routing shape) returns an untyped error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("Not Found"))
+		}))
+		defer srv.Close()
+
+		_, err := newTestClient(t, srv).GetJob(context.Background(), 999)
+		if err == nil {
+			t.Fatal("expected error for 404")
+		}
+		assertNotTyped(t, err, http.StatusNotFound)
+	})
+
+	t.Run("other failures return an untyped error", func(t *testing.T) {
+		for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusUnauthorized, http.StatusForbidden, http.StatusBadRequest, http.StatusNotFound} {
 			status := status
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(status)
@@ -243,8 +264,13 @@ func assertNotTyped(t *testing.T, err error, status int) {
 // isJobNotFound — the single not-found predicate
 // -------------------------------------------------------------------------
 
-// UNVERIFIED (ASSUMPTIONS A5/A6): only 404 is treated as "job missing". When the live
-// checks show what BICC really returns, change isJobNotFound and extend this table.
+// liveMissingJobBody is the body BICC returned on SIT on 2026-11-04 for GET of a numeric
+// job id that does not exist (ASSUMPTIONS A6, observed, read-only GET).
+const liveMissingJobBody = `{"code":"Bad Request","message":"Invalid Job Id provided"}`
+
+// The predicate is true ONLY for 400 + JSON {code:"Bad Request", message ~ "invalid job id"}.
+// Everything else, in particular a bare 404, must be false: a wrong host/proxy answering
+// 404 for every path would otherwise make Read drop every job from state.
 func TestIsJobNotFound(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -252,18 +278,36 @@ func TestIsJobNotFound(t *testing.T) {
 		body   string
 		want   bool
 	}{
-		{"404", http.StatusNotFound, "", true},
-		{"404 with body", http.StatusNotFound, `{"title":"Not Found"}`, true},
-		{"200", http.StatusOK, "", false},
-		{"204", http.StatusNoContent, "", false},
-		{"400", http.StatusBadRequest, "", false},
-		{"401", http.StatusUnauthorized, "", false},
-		{"403", http.StatusForbidden, "", false},
-		// A9: BICC answers 500 for a missing datastore key. A bare 500 must NOT be treated
-		// as "job gone": it is indistinguishable from an outage until A6 is run.
-		{"500", http.StatusInternalServerError, "", false},
-		{"500 with not-found-looking body", http.StatusInternalServerError, `{"detail":"not found"}`, false},
-		{"503", http.StatusServiceUnavailable, "", false},
+		{"400 exact live body", 400, liveMissingJobBody, true},
+		{"400 message in other case", 400, `{"code":"Bad Request","message":"INVALID JOB ID provided"}`, true},
+		{"400 message lower case", 400, `{"code":"Bad Request","message":"invalid job id"}`, true},
+		{"400 message with extra text", 400, `{"code":"Bad Request","message":"Error: Invalid Job Id provided for request 42"}`, true},
+		{"400 JSON with extra fields", 400, `{"code":"Bad Request","message":"Invalid Job Id provided","extra":1}`, true},
+		{"400 empty body", 400, ``, false},
+		{"400 non-JSON body", 400, `Invalid Job Id provided`, false},
+		{"400 non-JSON html", 400, `<html>Bad Request</html>`, false},
+		{"400 JBO-26048 constraint violation", 400, `{"code":"Bad Request","message":"JBO-26048: Constraint \"X_FK\" violated during post operation"}`, false},
+		{"400 Invalid Job Id with a different code", 400, `{"code":"Conflict","message":"Invalid Job Id provided"}`, false},
+		{"400 code in other case", 400, `{"code":"bad request","message":"Invalid Job Id provided"}`, false},
+		{"400 JSON without message", 400, `{"code":"Bad Request"}`, false},
+		{"400 JSON without code", 400, `{"message":"Invalid Job Id provided"}`, false},
+		{"400 JSON array", 400, `[{"code":"Bad Request","message":"Invalid Job Id provided"}]`, false},
+		{"400 JSON null", 400, `null`, false},
+		{"500 with the live body", 500, liveMissingJobBody, false},
+		{"503 with the live body", 503, liveMissingJobBody, false},
+		{"401 with the live body", 401, liveMissingJobBody, false},
+		{"403 with the live body", 403, liveMissingJobBody, false},
+		{"404 with the live body", 404, liveMissingJobBody, false},
+		{"200 with the live body", 200, liveMissingJobBody, false},
+		{"404 Not Found (live routing shape)", 404, `Not Found`, false},
+		{"404 empty", 404, ``, false},
+		{"404 JSON not-found-looking", 404, `{"title":"Not Found"}`, false},
+		{"200 empty", 200, ``, false},
+		{"204 empty", 204, ``, false},
+		{"500 empty", 500, ``, false},
+		// A9: BICC answers 500 for a missing datastore key; 5xx is never "job gone".
+		{"500 with not-found-looking body", 500, `{"detail":"not found"}`, false},
+		{"503 empty", 503, ``, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -344,9 +388,27 @@ func TestDeleteJob(t *testing.T) {
 		}
 	})
 
-	t.Run("404 returns typed not-found error", func(t *testing.T) {
+	// OBSERVED 2026-11-04 (A5): DELETE of an already-missing id returns HTTP 200, so the
+	// live case is the success path above. The two cases below are DEFENSIVE: BICC has
+	// not been seen to answer a DELETE this way.
+	t.Run("defensive: 400 Invalid Job Id (live GET body) returns typed not-found error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(liveMissingJobBody))
+		}))
+		defer srv.Close()
+
+		err := newTestClient(t, srv).DeleteJob(context.Background(), 7)
+		if err == nil {
+			t.Fatal("expected error for 400 Invalid Job Id")
+		}
+		assertNotFound(t, err, 7, http.MethodDelete, http.StatusBadRequest)
+	})
+
+	t.Run("defensive: bare 404 is an untyped error, not not-found", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("Not Found"))
 		}))
 		defer srv.Close()
 
@@ -354,7 +416,7 @@ func TestDeleteJob(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for 404")
 		}
-		assertNotFound(t, err, 7, http.MethodDelete, http.StatusNotFound)
+		assertNotTyped(t, err, 404)
 	})
 
 	t.Run("500 returns an untyped error", func(t *testing.T) {

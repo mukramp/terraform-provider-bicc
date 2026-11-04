@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -18,8 +19,19 @@ import (
 // Resource-level tests for Read and Delete (PLAN task 5, KI-5). They call the
 // resource methods the way the plugin framework does, against an httptest mock.
 // No live BICC call is made (DR-8).
+//
+// The mock shapes are the ones OBSERVED on SIT on 2026-11-04 (ASSUMPTIONS A5, A6):
+//   - GET of a numeric id that does not exist: HTTP 400 {"code":"Bad Request","message":"Invalid Job Id provided"}
+//   - GET of a malformed id: HTTP 404, plain text "Not Found" (routing level, NOT a missing job)
+//   - DELETE of a missing id: HTTP 200
+//
+// Open risk, not covered because it was not observed: the same 400 may be returned for an
+// existing job the account cannot see (permissions); Read would then drop it from state.
 
-const testJobID = "4242"
+const (
+	testJobID          = "4242"
+	liveMissingJobBody = `{"code":"Bad Request","message":"Invalid Job Id provided"}`
+)
 
 func newMockedResource(t *testing.T, handler http.HandlerFunc) (*biccJobResource, *int32) {
 	t.Helper()
@@ -95,9 +107,11 @@ func stateDescription(t *testing.T, s tfsdk.State) (types.String, bool) {
 }
 
 func TestReadRemovesStateOnlyOnNotFound(t *testing.T) {
-	t.Run("404 removes the resource from state without error", func(t *testing.T) {
+	t.Run("400 Invalid Job Id (live shape) removes the resource from state without error", func(t *testing.T) {
 		r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(liveMissingJobBody))
 		})
 		resp := runRead(t, r, existingState(t))
 
@@ -114,6 +128,15 @@ func TestReadRemovesStateOnlyOnNotFound(t *testing.T) {
 		status int
 		body   string
 	}{
+		// A bare 404 is NOT "job gone" (A6): a wrong host/port/proxy could answer 404 to
+		// everything, and Read would drop every job from state.
+		{"404 Not Found (live routing shape) errors and keeps state", http.StatusNotFound, `Not Found`},
+		{"404 empty errors and keeps state", http.StatusNotFound, ``},
+		{"400 other message errors and keeps state", http.StatusBadRequest, `{"code":"Bad Request","message":"JBO-26048: Constraint \"X_FK\" violated during post operation"}`},
+		{"400 empty body errors and keeps state", http.StatusBadRequest, ``},
+		{"400 non-JSON errors and keeps state", http.StatusBadRequest, `Invalid Job Id provided`},
+		{"400 live body with different code errors and keeps state", http.StatusBadRequest, `{"code":"Conflict","message":"Invalid Job Id provided"}`},
+		{"500 with the live body errors and keeps state", http.StatusInternalServerError, liveMissingJobBody},
 		{"500 errors and keeps state", http.StatusInternalServerError, `{"error":"boom"}`},
 		{"503 errors and keeps state", http.StatusServiceUnavailable, ``},
 		{"401 errors and keeps state", http.StatusUnauthorized, ``},
@@ -157,6 +180,23 @@ func TestReadRemovesStateOnlyOnNotFound(t *testing.T) {
 		}
 	})
 
+	t.Run("timeout errors and keeps state", func(t *testing.T) {
+		release := make(chan struct{})
+		r, _ := newMockedResource(t, func(http.ResponseWriter, *http.Request) {
+			<-release // hang until the client gives up
+		})
+		t.Cleanup(func() { close(release) })
+		r.client.HTTPClient.Timeout = 50 * time.Millisecond
+
+		resp := runRead(t, r, existingState(t))
+		if !resp.Diagnostics.HasError() {
+			t.Fatal("expected an error diagnostic")
+		}
+		if _, ok := stateDescription(t, resp.State); !ok {
+			t.Fatal("state was removed on a timeout (KI-5)")
+		}
+	})
+
 	t.Run("200 updates state (happy path unchanged)", func(t *testing.T) {
 		r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -174,12 +214,14 @@ func TestReadRemovesStateOnlyOnNotFound(t *testing.T) {
 }
 
 func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
-	t.Run("404 counts as success", func(t *testing.T) {
+	// OBSERVED 2026-11-04 (A5): DELETE of an already-missing id returns HTTP 200, so a
+	// repeated or racing delete succeeds through the ordinary success path.
+	t.Run("200 for an already-missing job (live shape) succeeds", func(t *testing.T) {
 		r, calls := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
 			if req.Method != http.MethodDelete || !strings.HasSuffix(req.URL.Path, "/"+testJobID) {
 				t.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
 			}
-			w.WriteHeader(http.StatusNotFound)
+			w.WriteHeader(http.StatusOK)
 		})
 		resp := runDelete(t, r, existingState(t))
 		if resp.Diagnostics.HasError() {
@@ -190,26 +232,55 @@ func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
 		}
 	})
 
-	t.Run("200 and 204 succeed", func(t *testing.T) {
-		for _, status := range []int{http.StatusOK, http.StatusNoContent} {
-			r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(status)
-			})
-			if resp := runDelete(t, r, existingState(t)); resp.Diagnostics.HasError() {
-				t.Errorf("status %d: unexpected error: %v", status, resp.Diagnostics)
-			}
+	// DEFENSIVE: BICC has not been observed to answer a DELETE with the GET not-found
+	// shape. If it ever does, Delete still succeeds.
+	t.Run("defensive: 400 Invalid Job Id body counts as success", func(t *testing.T) {
+		r, calls := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(liveMissingJobBody))
+		})
+		resp := runDelete(t, r, existingState(t))
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("unexpected error: %v", resp.Diagnostics)
+		}
+		if got := atomic.LoadInt32(calls); got != 1 {
+			t.Errorf("expected exactly 1 request (no retries), got %d", got)
 		}
 	})
 
-	for _, status := range []int{http.StatusInternalServerError, http.StatusUnauthorized, http.StatusForbidden, http.StatusBadRequest} {
-		status := status
-		t.Run(http.StatusText(status)+" fails without retry", func(t *testing.T) {
+	t.Run("204 succeeds", func(t *testing.T) {
+		r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+		if resp := runDelete(t, r, existingState(t)); resp.Diagnostics.HasError() {
+			t.Errorf("unexpected error: %v", resp.Diagnostics)
+		}
+	})
+
+	failCases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"500", http.StatusInternalServerError, ``},
+		{"401", http.StatusUnauthorized, ``},
+		{"403", http.StatusForbidden, ``},
+		{"400 other message", http.StatusBadRequest, `{"code":"Bad Request","message":"JBO-26048: Constraint violated"}`},
+		{"400 empty", http.StatusBadRequest, ``},
+		// A bare 404 is not "job gone" (A6), so Delete reports it instead of hiding it.
+		{"404 Not Found", http.StatusNotFound, `Not Found`},
+		{"500 with the live body", http.StatusInternalServerError, liveMissingJobBody},
+	}
+	for _, tc := range failCases {
+		tc := tc
+		t.Run(tc.name+" fails without retry", func(t *testing.T) {
 			r, calls := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(status)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
 			})
 			resp := runDelete(t, r, existingState(t))
 			if !resp.Diagnostics.HasError() {
-				t.Fatalf("status %d: expected an error diagnostic", status)
+				t.Fatalf("status %d: expected an error diagnostic", tc.status)
 			}
 			if got := atomic.LoadInt32(calls); got != 1 {
 				t.Errorf("expected exactly 1 request (no retries), got %d", got)
