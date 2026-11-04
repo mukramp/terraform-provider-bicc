@@ -314,7 +314,7 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	plan.Name = types.StringValue(refreshed.Name)
-	plan.Description = types.StringValue(refreshed.Description)
+	plan.Description = descriptionFromAPI(plan.Description, refreshed.Description)
 	plan.DataStores = newDataStores
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
@@ -385,7 +385,7 @@ func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, re
 	// Do NOT overwrite state.Name from job.Name — the BICC API ignores the name field on
 	// update and always returns the original job name. Preserving state.Name (which holds
 	// the value from config) prevents perpetual drift after a rename.
-	state.Description = types.StringValue(job.Description)
+	state.Description = descriptionFromAPI(state.Description, job.Description)
 	state.DataStores = newDataStores
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
@@ -446,7 +446,7 @@ func (r *biccJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	// BICC API ignores name on update and returns the original name — keep plan (config) as
 	// authoritative so state matches config and avoids "inconsistent result" errors.
 	// plan.Name already holds the config value; do not overwrite it from refreshed.Name.
-	plan.Description = types.StringValue(refreshed.Description)
+	plan.Description = descriptionFromAPI(plan.Description, refreshed.Description)
 	plan.DataStores = newDataStores
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
@@ -523,7 +523,7 @@ func (r *biccJobResource) ImportState(ctx context.Context, req resource.ImportSt
 	state := biccJobModel{
 		ID:          types.StringValue(strconv.FormatInt(jobID, 10)),
 		Name:        types.StringValue(job.Name),
-		Description: types.StringValue(job.Description),
+		Description: descriptionFromAPI(types.StringNull(), job.Description),
 		DataStores:  newDataStores,
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
@@ -728,6 +728,25 @@ func (r *biccJobResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 
 	plan.DataStores = newSet
 	resp.Diagnostics.Append(resp.Plan.Set(ctx, plan)...)
+}
+
+// descriptionFromAPI maps the API description to the value stored in state.
+//
+// The schema has description Optional and NOT Computed, so a config that omits it plans
+// null, and state must hold null for the next plan to be empty. The client decodes the
+// API's description into a plain string, so a JSON null (6 of 39 SIT jobs, OBSERVED
+// 2026-11-04, ASSUMPTIONS A12), a missing key and "" all arrive as "". Rule: when the API
+// value is "" and the prior value (state for Read, plan for Create/Update, null for
+// ImportState) is null, keep null. In every other case the API value is stored, so a
+// description that really differs from the prior value is still reported as drift. A
+// prior value of "" stays "" (a config that sets description = "" plans ""), and an
+// unknown prior value (cannot happen for an Optional, non-Computed attribute) is not
+// treated as null.
+func descriptionFromAPI(prior types.String, api string) types.String {
+	if api == "" && prior.IsNull() {
+		return types.StringNull()
+	}
+	return types.StringValue(api)
 }
 
 func isSetEmpty(s types.Set) bool {
