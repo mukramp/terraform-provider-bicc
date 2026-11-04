@@ -29,7 +29,7 @@ Reference behaviour is the CLI. Mapping of CLI pieces to provider code (reported
 | 2 | Fix import | Not started | none |
 | 3 | Handle job rename safely | Not started. Blocked on check A1 | task 5, A1 |
 | 4 | Handle PUT response status | Not started. Blocked on check A2 | A2 |
-| 5 | Make Read and Delete safe | Not started | A5, A6 recommended first |
+| 5 | Make Read and Delete safe | Implemented on branch `fix/safe-read-delete`, not merged, not released. Mock-tested only; the 404-means-missing assumption is unverified until A5/A6 are run (one predicate, `isJobNotFound`, to adjust). Needs independent review (yellow lane) | A5, A6 recommended first |
 | 6 | Stop swallowing column lookup errors | Not started | none |
 | 7 | Add tests | Not started | writes tests for 2 to 6 |
 | 8 | Clean up docs, examples, CI | Partial: README, `docs/index.md`, `docs/resources/job.md` corrected in the change that created this file. Open: `examples/main.tf`, CI, LICENSE, `main.go` version, `tfplugindocs` | none |
@@ -101,6 +101,8 @@ Before starting tasks 3, 4 and 9, run the checks in [ASSUMPTIONS.md](ASSUMPTIONS
 - **Current:** Read drops state on any error; Delete fails on 404 (KI-5).
 - **Change:** typed not-found error in the client; remove from state only on a real 404 and return an error for other failures; Delete treats 404 as success; no retries until rate limit and concurrent behaviour are known (ASSUMPTIONS C2).
 - **Gives you:** transient API failures no longer make Terraform plan to recreate or drop a job, and deletes are idempotent. Because deletes run in prd, this is the main safety work in the provider.
+- **Implemented (branch `fix/safe-read-delete`):** `client.NotFoundError` plus `isJobNotFound` (HTTP 404 only) in `bicc/client/errors.go`; Read and Delete behave as described above; tests in `bicc/client/client_test.go` and `bicc/resource_job_readdelete_test.go`. `ImportState`, Create and Update also call `GetJob` and still error on any failure (not-found included), unchanged.
+- **Still open:** run A5 and A6, then adjust `isJobNotFound` (status and possibly a body marker) and its test table. Until then a missing job that BICC reports as 500 shows as a Read error, not as a dropped resource.
 
 ### Task 6. Stop swallowing column lookup errors
 - **Original plan:** `auto_populate_all_columns` needs a live lookup, resolved in plan (`ModifyPlan`) or modelled as computed to avoid "inconsistent result after apply".

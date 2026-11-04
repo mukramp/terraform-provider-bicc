@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -159,7 +160,7 @@ func TestGetJob(t *testing.T) {
 		}
 	})
 
-	t.Run("404 returns error", func(t *testing.T) {
+	t.Run("404 returns typed not-found error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
@@ -170,7 +171,107 @@ func TestGetJob(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for 404")
 		}
+		assertNotFound(t, err, 999, http.MethodGet, http.StatusNotFound)
 	})
+
+	t.Run("non-404 failures return an untyped error", func(t *testing.T) {
+		for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusUnauthorized, http.StatusForbidden, http.StatusBadRequest} {
+			status := status
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			c := newTestClient(t, srv)
+			_, err := c.GetJob(context.Background(), 1)
+			srv.Close()
+			if err == nil {
+				t.Fatalf("status %d: expected error", status)
+			}
+			assertNotTyped(t, err, status)
+		}
+	})
+
+	t.Run("200 with invalid JSON returns an untyped error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`not json`))
+		}))
+		defer srv.Close()
+		_, err := newTestClient(t, srv).GetJob(context.Background(), 1)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		assertNotTyped(t, err, 200)
+	})
+
+	t.Run("network error returns an untyped error", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		c := newTestClient(t, srv)
+		srv.Close() // connection refused from here on
+		_, err := c.GetJob(context.Background(), 1)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		assertNotTyped(t, err, 0)
+	})
+}
+
+// assertNotFound checks that err is the typed not-found error through both errors.Is and errors.As.
+func assertNotFound(t *testing.T, err error, jobID int64, method string, status int) {
+	t.Helper()
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("errors.Is(err, ErrNotFound) = false for %v", err)
+	}
+	var nf *NotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("errors.As(*NotFoundError) = false for %v", err)
+	}
+	if nf.JobID != jobID || nf.Method != method || nf.StatusCode != status {
+		t.Errorf("NotFoundError = %+v, want job %d, %s, %d", *nf, jobID, method, status)
+	}
+	if !IsNotFound(err) {
+		t.Error("IsNotFound = false")
+	}
+}
+
+func assertNotTyped(t *testing.T, err error, status int) {
+	t.Helper()
+	if errors.Is(err, ErrNotFound) || IsNotFound(err) {
+		t.Errorf("status %d: error must not be a not-found error: %v", status, err)
+	}
+}
+
+// -------------------------------------------------------------------------
+// isJobNotFound — the single not-found predicate
+// -------------------------------------------------------------------------
+
+// UNVERIFIED (ASSUMPTIONS A5/A6): only 404 is treated as "job missing". When the live
+// checks show what BICC really returns, change isJobNotFound and extend this table.
+func TestIsJobNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"404", http.StatusNotFound, "", true},
+		{"404 with body", http.StatusNotFound, `{"title":"Not Found"}`, true},
+		{"200", http.StatusOK, "", false},
+		{"204", http.StatusNoContent, "", false},
+		{"400", http.StatusBadRequest, "", false},
+		{"401", http.StatusUnauthorized, "", false},
+		{"403", http.StatusForbidden, "", false},
+		// A9: BICC answers 500 for a missing datastore key. A bare 500 must NOT be treated
+		// as "job gone": it is indistinguishable from an outage until A6 is run.
+		{"500", http.StatusInternalServerError, "", false},
+		{"500 with not-found-looking body", http.StatusInternalServerError, `{"detail":"not found"}`, false},
+		{"503", http.StatusServiceUnavailable, "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isJobNotFound(tc.status, []byte(tc.body)); got != tc.want {
+				t.Errorf("isJobNotFound(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
+			}
+		})
+	}
 }
 
 // -------------------------------------------------------------------------
@@ -241,6 +342,32 @@ func TestDeleteJob(t *testing.T) {
 		if err := c.DeleteJob(context.Background(), 1); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+	})
+
+	t.Run("404 returns typed not-found error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		err := newTestClient(t, srv).DeleteJob(context.Background(), 7)
+		if err == nil {
+			t.Fatal("expected error for 404")
+		}
+		assertNotFound(t, err, 7, http.MethodDelete, http.StatusNotFound)
+	})
+
+	t.Run("500 returns an untyped error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		err := newTestClient(t, srv).DeleteJob(context.Background(), 7)
+		if err == nil {
+			t.Fatal("expected error for 500")
+		}
+		assertNotTyped(t, err, 500)
 	})
 
 	t.Run("non-200/204 returns error", func(t *testing.T) {

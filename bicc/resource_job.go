@@ -314,7 +314,17 @@ func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, re
 
 	job, err := r.client.GetJob(ctx, jobID)
 	if err != nil {
-		resp.State.RemoveResource(ctx)
+		// Drop the resource from state ONLY when the API says the job does not exist.
+		// Any other failure (5xx, 401/403, network, bad JSON) must not be read as
+		// "deleted": removing state would make Terraform plan to recreate the job
+		// (KI-5). Leave state untouched and surface the error.
+		// What "does not exist" looks like on the wire is UNVERIFIED (ASSUMPTIONS A5/A6);
+		// see client.isJobNotFound.
+		if client.IsNotFound(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		resp.Diagnostics.AddError("Error reading job", fmt.Sprintf("Could not read job %d; state left unchanged: %s", jobID, err))
 		return
 	}
 
@@ -415,7 +425,11 @@ func (r *biccJobResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	if err := r.client.DeleteJob(ctx, jobID); err != nil {
+	// Delete is idempotent: a job that is already gone counts as deleted. Any other
+	// failure is an error, and there are no retries (ASSUMPTIONS C2). Whether BICC
+	// supports DELETE at all, and what it returns for a missing job, is UNVERIFIED
+	// (A5/A6); see client.isJobNotFound.
+	if err := r.client.DeleteJob(ctx, jobID); err != nil && !client.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting job", err.Error())
 	}
 }

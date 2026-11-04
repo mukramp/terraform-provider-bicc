@@ -145,6 +145,11 @@ func (c *Client) CreateOrUpdateJob(ctx context.Context, job *Job) (*JobResponse,
 }
 
 // GetJob retrieves a BICC job by ID.
+//
+// It returns a *NotFoundError (see IsNotFound) only when isJobNotFound says the
+// response means "this job does not exist". Every other failure (network error,
+// 401/403, 5xx, unparseable body) is returned as an ordinary error, so callers
+// can tell a missing job from a transient failure.
 func (c *Client) GetJob(ctx context.Context, jobID int64) (*Job, error) {
 	path := fmt.Sprintf("/biacm/rest/meta/jobs/%d", jobID)
 
@@ -159,8 +164,8 @@ func (c *Client) GetJob(ctx context.Context, jobID int64) (*Job, error) {
 		return nil, fmt.Errorf("error reading response body: %v", err)
 	}
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("job not found")
+	if isJobNotFound(resp.StatusCode, bodyBytes) {
+		return nil, &NotFoundError{JobID: jobID, Method: http.MethodGet, StatusCode: resp.StatusCode}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -204,7 +209,10 @@ func (c *Client) GetDataStoreColumns(ctx context.Context, dataStoreKey string) (
 	return dataStore.Columns, nil
 }
 
-// DeleteJob deletes a BICC job (note: BICC API may not support DELETE).
+// DeleteJob deletes a BICC job (note: BICC API may not support DELETE, ASSUMPTIONS A5).
+//
+// A missing job is reported as a *NotFoundError (see IsNotFound); the caller decides
+// whether that counts as success. No retries (ASSUMPTIONS C2).
 func (c *Client) DeleteJob(ctx context.Context, jobID int64) error {
 	path := fmt.Sprintf("/biacm/rest/meta/jobs/%d", jobID)
 
@@ -214,10 +222,13 @@ func (c *Client) DeleteJob(ctx context.Context, jobID int64) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+		return nil
 	}
 
-	return nil
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if isJobNotFound(resp.StatusCode, bodyBytes) {
+		return &NotFoundError{JobID: jobID, Method: http.MethodDelete, StatusCode: resp.StatusCode}
+	}
+	return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
 }
