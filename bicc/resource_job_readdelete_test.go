@@ -437,3 +437,46 @@ func TestCreateLeavesStateEmptyWhenReReadFails(t *testing.T) {
 		}
 	})
 }
+
+// MINOR-6: a PUT that answers 200 with an unusable id (0 or negative) must not lead to a
+// GET of that id (BICC answers 400 "Invalid Job Id" for it) and must not set state.
+func TestCreateRejectsUnusablePUTResponseID(t *testing.T) {
+	for _, id := range []string{"0", "-1"} {
+		id := id
+		t.Run("PUT response id "+id, func(t *testing.T) {
+			var gets, puts int32
+			r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodPut {
+					atomic.AddInt32(&puts, 1)
+					_, _ = w.Write([]byte(`{"status":"success","id":"` + id + `"}`))
+					return
+				}
+				atomic.AddInt32(&gets, 1)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(liveMissingJobBody))
+			})
+			req, resp := newCreateReq(t)
+			r.Create(context.Background(), req, resp)
+
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if !resp.State.Raw.IsNull() {
+				t.Fatal("state must stay empty")
+			}
+			if got := atomic.LoadInt32(&gets); got != 0 {
+				t.Errorf("expected 0 GETs, got %d", got)
+			}
+			if got := atomic.LoadInt32(&puts); got != 1 {
+				t.Errorf("expected exactly 1 PUT, got %d", got)
+			}
+			var msg string
+			for _, d := range resp.Diagnostics.Errors() {
+				msg += d.Summary() + " " + d.Detail()
+			}
+			if !strings.Contains(msg, "unusable id") || !strings.Contains(msg, id) {
+				t.Errorf("error message should mention the unusable id %s: %s", id, msg)
+			}
+		})
+	}
+}

@@ -269,6 +269,16 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
+	// A PUT answer with an id that is not a positive number cannot be read back (BICC
+	// answers 400 "Invalid Job Id" for it, A6) and cannot be tracked: fail before any GET
+	// and write no state.
+	if jobResp.ID <= 0 {
+		resp.Diagnostics.AddError("Error creating job",
+			fmt.Sprintf("The PUT returned HTTP success but BICC returned an unusable id %d for the job. "+
+				"No state was saved and the job was not read back.", jobResp.ID))
+		return
+	}
+
 	plan.ID = types.StringValue(strconv.FormatInt(jobResp.ID, 10))
 
 	// Do NOT write any state before the re-read below succeeds. If state held the id and
