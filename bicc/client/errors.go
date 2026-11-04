@@ -1,9 +1,11 @@
 package client
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // ErrNotFound is matched by errors.Is for every *NotFoundError.
@@ -34,13 +36,38 @@ func IsNotFound(err error) bool {
 // isJobNotFound is the ONE place that decides whether a response to GET/DELETE on
 // /biacm/rest/meta/jobs/{id} means "the job does not exist".
 //
-// UNVERIFIED (docs/ASSUMPTIONS.md A5, A6): what BICC returns for a missing job has not
-// been observed. HTTP 404 is the assumption. BICC returned HTTP 500, not 404, for a
-// missing data store key (A9, observed 2026-11-03), so a missing job may well be a 500
-// with a recognisable body. Do NOT widen this to "any 5xx": that would make a transient
-// outage look like a deleted job and let Read drop state (KI-5). Once A5/A6 are run, extend
-// this function (status plus a specific body marker) and its test, and nothing else.
+// OBSERVED 2026-11-04 on SIT (docs/ASSUMPTIONS.md A6, read-only GETs): a numeric id that
+// does not exist (1, -5, a deleted id) returns HTTP 400 with the JSON body
+//
+//	{"code":"Bad Request","message":"Invalid Job Id provided"}
+//
+// "Deleted" and "never existed" cannot be told apart. A non-numeric or overflowing id
+// returns a plain-text HTTP 404 "Not Found" from the routing layer, which is NOT a
+// missing job. A repeat DELETE of a missing id returns HTTP 200 (A5), so DELETE never
+// reaches this predicate in the live case.
+//
+// The predicate is deliberately narrow and true only for: status 400, a JSON body whose
+// code is exactly "Bad Request" and whose message contains "invalid job id"
+// (case-insensitive). In particular:
+//   - a bare 404 is never "job gone": a wrong host, port or proxy could answer 404 for
+//     every path, and Read would then drop every job from state (the plan would
+//     recreate them all);
+//   - any other 400 (for example a JBO-26048 constraint violation), 5xx, 401 and 403
+//     are errors, not "job gone".
+//
+// OPEN RISK (A6, unchecked): the same 400 may also be returned for an existing job the
+// account cannot see (permissions). If so, Read would drop such a job from state. Do
+// not widen this function; narrow it further if that is ever observed.
 func isJobNotFound(statusCode int, body []byte) bool {
-	_ = body // reserved for a body-marker check once A5/A6 show what BICC sends
-	return statusCode == http.StatusNotFound
+	if statusCode != http.StatusBadRequest {
+		return false
+	}
+	var e struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil {
+		return false
+	}
+	return e.Code == "Bad Request" && strings.Contains(strings.ToLower(e.Message), "invalid job id")
 }
