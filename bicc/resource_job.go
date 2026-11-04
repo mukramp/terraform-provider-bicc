@@ -455,11 +455,11 @@ func (r *biccJobResource) Delete(ctx context.Context, req resource.DeleteRequest
 	}
 
 	// Delete is idempotent because BICC answers HTTP 200 for a repeat DELETE of a missing
-	// id (OBSERVED 2026-11-04, ASSUMPTIONS A5). The NotFoundError exemption below is
-	// DEFENSIVE (a DELETE has not been seen to return the GET not-found shape). Any other
-	// failure is an error, and there are no retries (ASSUMPTIONS C2). Deletes take about
-	// 2.5 minutes on SIT (A10), against the 300s client timeout.
-	if err := r.client.DeleteJob(ctx, jobID); err != nil && !client.IsNotFound(err) {
+	// id (OBSERVED 2026-11-04, ASSUMPTIONS A5). There is no not-found exemption: any
+	// non-2xx (including 400 and 404) is an error, because reporting success while the job
+	// may still exist on BICC would drop it from Terraform. No retries (ASSUMPTIONS C2).
+	// Deletes take about 2.5 minutes on SIT (A10), against the 300s client timeout.
+	if err := r.client.DeleteJob(ctx, jobID); err != nil {
 		resp.Diagnostics.AddError("Error deleting job", err.Error())
 	}
 }

@@ -265,7 +265,7 @@ func TestReadDeleteRejectUnusableStateIDs(t *testing.T) {
 	}
 }
 
-func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
+func TestDeleteIdempotencyAndErrors(t *testing.T) {
 	// OBSERVED 2026-11-04 (A5): DELETE of an already-missing id returns HTTP 200, so a
 	// repeated or racing delete succeeds through the ordinary success path.
 	t.Run("200 for an already-missing job (live shape) succeeds", func(t *testing.T) {
@@ -278,22 +278,6 @@ func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
 		resp := runDelete(t, r, existingState(t))
 		if resp.Diagnostics.HasError() {
 			t.Fatalf("delete of an already-missing job must succeed, got: %v", resp.Diagnostics)
-		}
-		if got := atomic.LoadInt32(calls); got != 1 {
-			t.Errorf("expected exactly 1 request (no retries), got %d", got)
-		}
-	})
-
-	// DEFENSIVE: BICC has not been observed to answer a DELETE with the GET not-found
-	// shape. If it ever does, Delete still succeeds.
-	t.Run("defensive: 400 Invalid Job Id body counts as success", func(t *testing.T) {
-		r, calls := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(liveMissingJobBody))
-		})
-		resp := runDelete(t, r, existingState(t))
-		if resp.Diagnostics.HasError() {
-			t.Fatalf("unexpected error: %v", resp.Diagnostics)
 		}
 		if got := atomic.LoadInt32(calls); got != 1 {
 			t.Errorf("expected exactly 1 request (no retries), got %d", got)
@@ -318,8 +302,10 @@ func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
 		{"401", http.StatusUnauthorized, ``},
 		{"403", http.StatusForbidden, ``},
 		{"400 other message", http.StatusBadRequest, `{"code":"Bad Request","message":"JBO-26048: Constraint violated"}`},
+		// Not mapped to success: the job could still exist on BICC.
+		{"400 with the live GET not-found body", http.StatusBadRequest, liveMissingJobBody},
 		{"400 empty", http.StatusBadRequest, ``},
-		// A bare 404 is not "job gone" (A6), so Delete reports it instead of hiding it.
+		// DELETE has no not-found mapping: 404 is an error, never reported as success.
 		{"404 Not Found", http.StatusNotFound, `Not Found`},
 		{"500 with the live body", http.StatusInternalServerError, liveMissingJobBody},
 	}
