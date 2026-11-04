@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -500,6 +501,83 @@ func TestCreateRejectsUnusablePUTResponseID(t *testing.T) {
 			if !strings.Contains(msg, "unusable id") || !strings.Contains(msg, id) {
 				t.Errorf("error message should mention the unusable id %s: %s", id, msg)
 			}
+			if !strings.Contains(msg, "may exist on BICC") || !strings.Contains(msg, "Nothing was saved to state") {
+				t.Errorf("error message should say the job may exist and nothing was saved: %s", msg)
+			}
 		})
+	}
+}
+
+// M-3a: a PUT that answers 2xx but whose body has no usable id (JobResponse cannot be
+// decoded) may still have created the job. The diagnostic must say BICC accepted the PUT,
+// that the job may exist under the configured name, and that nothing was saved.
+func TestCreateReportsPossibleOrphanWhenPUTBodyHasNoUsableID(t *testing.T) {
+	for _, body := range []string{`{}`, `{"id":"x"}`, `not json`, `{"id":true}`} {
+		body := body
+		t.Run("PUT 200 body "+body, func(t *testing.T) {
+			var gets int32
+			r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodPut {
+					_, _ = w.Write([]byte(body))
+					return
+				}
+				atomic.AddInt32(&gets, 1)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(liveMissingJobBody))
+			})
+			req, resp := newCreateReq(t)
+			r.Create(context.Background(), req, resp)
+
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if !resp.State.Raw.IsNull() {
+				t.Fatal("state must stay empty")
+			}
+			if got := atomic.LoadInt32(&gets); got != 0 {
+				t.Errorf("expected 0 GETs, got %d", got)
+			}
+			var msg string
+			for _, d := range resp.Diagnostics.Errors() {
+				msg += d.Summary() + " " + d.Detail()
+			}
+			for _, want := range []string{"BICC accepted the PUT", "no usable job id", "may exist on BICC", `"SIT_TEST_JOB"`, "Nothing was saved to state"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error message lacks %q: %s", want, msg)
+				}
+			}
+		})
+	}
+
+	// A non-2xx PUT keeps the plain wording: BICC did not accept anything.
+	t.Run("PUT 500 does not claim the job may exist", func(t *testing.T) {
+		r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		req, resp := newCreateReq(t)
+		r.Create(context.Background(), req, resp)
+		var msg string
+		for _, d := range resp.Diagnostics.Errors() {
+			msg += d.Summary() + " " + d.Detail()
+		}
+		if !resp.Diagnostics.HasError() || strings.Contains(msg, "may exist on BICC") {
+			t.Errorf("unexpected diagnostics: %s", msg)
+		}
+	})
+}
+
+// M-3b: after a successful PUT and GET, a buildDataStoresFromAPI error must carry the same
+// orphan wording naming the job id. NOT covered end to end: no mock GET body can make
+// buildDataStoresFromAPI add an error (probed 2026-11-04: duplicate data stores and
+// duplicate columns both return no diagnostics; the other inputs are typed by the
+// framework). Only the wording helper is pinned here; the wiring in Create is reviewed, not tested.
+func TestOrphanProcessingDetailWording(t *testing.T) {
+	var diags diag.Diagnostics
+	diags.AddError("Value Conversion Error", "boom")
+	msg := orphanProcessingDetail(777, diags)
+	for _, want := range []string{"job id 777", "boom", "No state was saved", "A1, unverified", "check BICC for job 777 or the job name first"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message lacks %q: %s", want, msg)
+		}
 	}
 }

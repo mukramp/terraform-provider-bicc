@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -116,6 +117,40 @@ func TestCreateOrUpdateJob(t *testing.T) {
 		}
 		if resp.ID != 123 {
 			t.Errorf("ID: got %d, want 123", resp.ID)
+		}
+	})
+
+	// M-3a: 2xx with a body that has no usable id is typed (ErrUnusableResponse) so Create
+	// can say the job may exist; the message text is unchanged for other callers.
+	t.Run("2xx with unusable body is ErrUnusableResponse", func(t *testing.T) {
+		for _, body := range []string{`{}`, `{"id":"x"}`, `not json`} {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(body))
+			}))
+			_, err := newTestClient(t, srv).CreateOrUpdateJob(context.Background(), &Job{Name: "test"})
+			srv.Close()
+			if err == nil || !errors.Is(err, ErrUnusableResponse) {
+				t.Errorf("body %q: err = %v, want ErrUnusableResponse", body, err)
+			}
+			if err != nil && !strings.HasPrefix(err.Error(), "error unmarshaling response: ") {
+				t.Errorf("body %q: message changed: %v", body, err)
+			}
+		}
+	})
+
+	t.Run("non-2xx and network errors are not ErrUnusableResponse", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{}`))
+		}))
+		_, err := newTestClient(t, srv).CreateOrUpdateJob(context.Background(), &Job{Name: "test"})
+		srv.Close()
+		if err == nil || errors.Is(err, ErrUnusableResponse) {
+			t.Errorf("500: err = %v, must be an ordinary error", err)
+		}
+		c := newTestClient(t, srv) // closed server
+		if _, err := c.CreateOrUpdateJob(context.Background(), &Job{Name: "test"}); err == nil || errors.Is(err, ErrUnusableResponse) {
+			t.Errorf("network: err = %v, must be an ordinary error", err)
 		}
 	})
 

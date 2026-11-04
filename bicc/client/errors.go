@@ -28,6 +28,18 @@ func (e *NotFoundError) Error() string {
 // Is makes errors.Is(err, ErrNotFound) true for a *NotFoundError.
 func (e *NotFoundError) Is(target error) bool { return target == ErrNotFound }
 
+// ErrUnusableResponse is matched by errors.Is for an error returned by CreateOrUpdateJob
+// when BICC answered the PUT with HTTP 200/201 but the body could not be decoded into a
+// job id. The job may exist on BICC; the caller cannot track it. The error text is
+// unchanged from before (the decoder's message); only the type is new.
+var ErrUnusableResponse = errors.New("PUT acknowledged but response unusable")
+
+type unusableResponseError struct{ err error }
+
+func (e *unusableResponseError) Error() string        { return e.err.Error() }
+func (e *unusableResponseError) Unwrap() error        { return e.err }
+func (e *unusableResponseError) Is(target error) bool { return target == ErrUnusableResponse }
+
 // IsNotFound reports whether err (or an error it wraps) is a *NotFoundError.
 func IsNotFound(err error) bool {
 	var nf *NotFoundError
