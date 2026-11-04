@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -270,6 +271,18 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	plan.ID = types.StringValue(strconv.FormatInt(jobResp.ID, 10))
+
+	// The job now exists on BICC. Record its id (and the known config values) in state
+	// BEFORE anything else can fail, so that a failure below leaves Terraform tracking
+	// the resource (saved as tainted because Create returns an error) instead of
+	// forgetting a job that exists and re-PUTting blindly on the next apply. Attributes
+	// that are still unknown in the plan are deliberately not written here.
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), plan.ID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), plan.Name)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("description"), plan.Description)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
 	// Re-read from the API so all Computed fields (is_effective_date_disabled,
 	// initial_extract_date, columns, etc.) are populated in state. Without this,

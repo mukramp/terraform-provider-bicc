@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/tra-jkv/terraform-provider-bicc/bicc/client"
 )
 
@@ -287,4 +289,111 @@ func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Create: after a successful PUT the job exists on BICC. If the re-read then fails, the id
+// must already be in state, so Terraform tracks the resource (tainted, because Create
+// returns an error) instead of forgetting it and re-PUTting blindly on the next apply.
+func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
+	newReq := func(t *testing.T) (resource.CreateRequest, *resource.CreateResponse) {
+		t.Helper()
+		sr := resourceSchema(t)
+		plan := tfsdk.Plan{Schema: sr.Schema}
+		model := biccJobModel{
+			ID:          types.StringUnknown(),
+			Name:        types.StringValue("SIT_TEST_JOB"),
+			Description: types.StringValue("desc"),
+			DataStores:  types.SetValueMust(types.ObjectType{AttrTypes: dataStoreAttrTypes}, []attr.Value{}),
+		}
+		if diags := plan.Set(context.Background(), model); diags.HasError() {
+			t.Fatalf("building plan: %v", diags)
+		}
+		// The framework hands Create a null state of the schema's type.
+		resp := &resource.CreateResponse{State: tfsdk.State{
+			Schema: sr.Schema,
+			Raw:    tftypes.NewValue(sr.Schema.Type().TerraformType(context.Background()), nil),
+		}}
+		return resource.CreateRequest{Plan: plan}, resp
+	}
+
+	failures := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"re-read 500", http.StatusInternalServerError, `boom`},
+		{"re-read 400 Invalid Job Id", http.StatusBadRequest, liveMissingJobBody},
+		{"re-read bad JSON", http.StatusOK, `not json`},
+	}
+	for _, tc := range failures {
+		tc := tc
+		t.Run(tc.name+" keeps the id in state and reports an error", func(t *testing.T) {
+			var puts int32
+			r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+				switch req.Method {
+				case http.MethodPut:
+					atomic.AddInt32(&puts, 1)
+					_, _ = w.Write([]byte(`{"status":"success","id":"555"}`))
+				default:
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(tc.body))
+				}
+			})
+			req, resp := newReq(t)
+			r.Create(context.Background(), req, resp)
+
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if resp.State.Raw.IsNull() {
+				t.Fatal("state is empty after a successful PUT: the job would exist on BICC untracked")
+			}
+			var id types.String
+			if diags := resp.State.GetAttribute(context.Background(), path.Root("id"), &id); diags.HasError() {
+				t.Fatalf("reading id: %v", diags)
+			}
+			if id.ValueString() != "555" {
+				t.Errorf("state id = %q, want %q", id.ValueString(), "555")
+			}
+			if got := atomic.LoadInt32(&puts); got != 1 {
+				t.Errorf("expected exactly 1 PUT, got %d", got)
+			}
+		})
+	}
+
+	t.Run("PUT failure leaves state empty", func(t *testing.T) {
+		r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		req, resp := newReq(t)
+		r.Create(context.Background(), req, resp)
+		if !resp.Diagnostics.HasError() {
+			t.Fatal("expected an error diagnostic")
+		}
+		if !resp.State.Raw.IsNull() {
+			t.Fatal("state must stay empty when the PUT itself failed")
+		}
+	})
+
+	t.Run("happy path still sets full state", func(t *testing.T) {
+		r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+			if req.Method == http.MethodPut {
+				_, _ = w.Write([]byte(`{"status":"success","id":"555"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"name":"SIT_TEST_JOB","description":"desc","dataStores":[],"schedules":null}`))
+		})
+		req, resp := newReq(t)
+		r.Create(context.Background(), req, resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("unexpected error: %v", resp.Diagnostics)
+		}
+		var m biccJobModel
+		if diags := resp.State.Get(context.Background(), &m); diags.HasError() {
+			t.Fatalf("reading state: %v", diags)
+		}
+		if m.ID.ValueString() != "555" || m.Name.ValueString() != "SIT_TEST_JOB" || m.DataStores.IsNull() {
+			t.Errorf("unexpected state: %+v", m)
+		}
+	})
 }
