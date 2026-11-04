@@ -52,10 +52,20 @@ import (
 // true becomes false). Result with the merged variant: planned `columns` differ from both
 // the config and the prior state. Confirmed in a scratch copy: removing the Defaults makes
 // the merged plan equal to the prior state. Whether real Terraform core reproduces it is
-// UNVERIFIED (B1); if it does, the user sees "Provider produced invalid plan" (a safe
-// failure: no apply happens), not a PUT. The merged variant therefore asserts everything
-// except `columns` and reports the columns difference as a skip, so it is neither hidden
-// nor turned into a failing test; when the gap is fixed the skip disappears by itself.
+// UNVERIFIED (B1; DECISIONS Q13). If it does, the plan would no longer match the config
+// for `columns`, and core would either report "Provider produced invalid plan" or accept
+// the plan with the flags reset to their defaults; which of the two happens, and whether an
+// apply could then send the reset flags in a PUT, is not known. Do not read this as a
+// safe failure. The merged variant therefore asserts everything except `columns` and
+// reports the columns difference as a skip, so it is neither hidden nor turned into a
+// failing test; when the gap is fixed the skip disappears by itself.
+//
+// RAW/MERGED ASYMMETRY FOR `columns`: in the raw variant the proposed element equals the
+// config element (computed attributes are null in both), so the framework finds the config
+// element, no Default overwrites anything, and `columns` pass. The merged variant is the
+// more core-like one and is the one that skips `columns` because of the Default
+// overwrite. So the "empty plan" result for `columns` rests on the raw variant only, which
+// is the less realistic of the two; for every other attribute both variants assert it.
 //
 // WHAT DOES NOT RUN (needs a terraform binary, ASSUMPTIONS B1):
 //   - Terraform core. The ProposedNewState is built here from the config-shaped object
