@@ -213,10 +213,13 @@ func TestGetDataStoreColumns(t *testing.T) {
 }
 
 // A9 (observed 2026-11-03, live SIT, read-only): a data store key that does not
-// exist returns HTTP 500 with a JSON body, not 404. The error must carry both
-// the status and the body, and 500 must not be treated as "not found".
+// exist returns HTTP 500 with a JSON body whose "code" is "Internal Server
+// Error", not 404. Only the status and that code were observed; the "message"
+// text below is invented for the test and is deliberately not asserted on.
+// The error must carry the status and the body, and 500 must not be treated as
+// "not found".
 func TestGetDataStoreColumns_Error500IncludesStatusAndBody(t *testing.T) {
-	const body = `{"code":"Internal Server Error","message":"Data store FscmTopModelAM.Nope.DoesNotExistPVO not found"}`
+	const body = `{"code":"Internal Server Error","message":"synthetic test message"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -236,8 +239,8 @@ func TestGetDataStoreColumns_Error500IncludesStatusAndBody(t *testing.T) {
 	if !strings.Contains(msg, "500") {
 		t.Errorf("error should include the status code, got: %s", msg)
 	}
-	if !strings.Contains(msg, "Internal Server Error") || !strings.Contains(msg, "DoesNotExistPVO not found") {
-		t.Errorf("error should include the response body, got: %s", msg)
+	if !strings.Contains(msg, "Internal Server Error") {
+		t.Errorf("error should include the response body (code), got: %s", msg)
 	}
 }
 
@@ -255,9 +258,16 @@ func TestGetDataStoreColumns_PathEscaping(t *testing.T) {
 			wantURI: "/biacm/rest/meta/datastores/HcmTopModelAnalyticsGlobalAM.HcmProfileCoreAM.CountryPVO",
 		},
 		{
-			name:    "space is escaped",
+			// Not a PathEscape discriminator: net/http escapes a space itself, so
+			// this passes with or without url.PathEscape. Kept as a wire-format check.
+			name:    "space on the wire (passes without PathEscape too)",
 			key:     "My DS.Key",
 			wantURI: "/biacm/rest/meta/datastores/My%20DS.Key",
+		},
+		{
+			name:    "percent sign is escaped, not decoded",
+			key:     "A%41.Key",
+			wantURI: "/biacm/rest/meta/datastores/A%2541.Key",
 		},
 		{
 			name:    "slash is escaped, not a path separator",

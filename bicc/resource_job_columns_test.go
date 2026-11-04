@@ -21,8 +21,10 @@ import (
 // auto_populate_all_columns data store must fail Create/Update and must never
 // lead to a PUT. Mocks only; no live BICC access.
 
-// A9 (observed 2026-11-03, live SIT): a missing key returns 500 with this shape.
-const missingKeyBody = `{"code":"Internal Server Error","message":"Data store not found"}`
+// A9 (observed 2026-11-03, live SIT): a missing key returns HTTP 500 whose JSON
+// body has "code":"Internal Server Error". Only the status and that code were
+// observed; the "message" text is invented for the mock and must not be asserted on.
+const missingKeyBody = `{"code":"Internal Server Error","message":"synthetic test message"}`
 
 // mockBICC records every request and answers datastore lookups from `lookups`
 // (key -> status, body). PUT /jobs/ answers a valid job response.
@@ -235,7 +237,7 @@ func errorText(d diag.Diagnostics) string {
 	return b.String()
 }
 
-// Create with a failing lookup (HTTP 500 body, as observed in A9): error
+// Create with a failing lookup (HTTP 500 with the A9 status and code): error
 // diagnostic naming the key and the underlying error, and no PUT.
 func TestCreate_FailedColumnLookup_NoPUT(t *testing.T) {
 	const key = "FscmTopModelAM.Nope.DoesNotExistPVO"
