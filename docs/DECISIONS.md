@@ -12,7 +12,7 @@ Status values: `Decided` (recorded in the old plan as resolved by the owner; the
 - Status: Decided (as recorded in the old plan). Confirmed by the owner 2026-11-03 (Q6).
 - Removing a job from the consumer repo deletes the BICC job in all environments (sit, stg, uat, prd), including its last-extract-date state. There is no `skip_delete` in the first version. `prevent_destroy` is not used either (see [CONSUMER-MIGRATION.md](CONSUMER-MIGRATION.md)).
 - Consequence: plan review is the only safeguard, so Delete must be correct (task 5 in [PLAN.md](PLAN.md)) and the first plans per environment must be read carefully. A rename is delete plus create (task 3).
-- Assumptions underneath: DELETE works on the BICC API (A5, unknown); a delete removes the last-extract-date state (reported, not checked).
+- Assumptions underneath: DELETE works on the BICC API (A5, observed 2026-11-04 on the SIT test job); a delete removes the last-extract-date state (reported, not checked).
 
 ### DR-2. Backfill is not managed by Terraform
 - Status: Decided (as recorded in the old plan). Confirmed by the owner 2026-11-03 (Q6). Matches commit `262107e` (v3.0.0): the BICC API does not support setting `lastExtractDate` through PUT (commit message, reported).

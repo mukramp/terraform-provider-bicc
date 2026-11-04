@@ -16,8 +16,8 @@ The single live source is the task table in [docs/PLAN.md](docs/PLAN.md). Do not
 
 What an agent must know now (refresh in the PR that changes it):
 - Tasks that are ready (no unverified API assumption behind them): 2 (import), 5 (read/delete safety), 6 (column lookup errors), 7 (tests), parts of 8 (examples, CI, LICENSE, `main.go` version).
-- Tasks 3, 4, 9 are blocked on live API checks A1 to A3 in [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md). Nobody has run any live check yet.
-- Open owner questions: [docs/DECISIONS.md](docs/DECISIONS.md) (Q2 distribution, Q5 pipeline behaviour, Q6 confirm decisions, Q7 task 1 commit).
+- Tasks 3, 4, 9 are blocked on live API checks A1 and A2 (A3 is done: the list API has no job ids) in [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md). Live checks run so far (SIT test job only, see DR-8): A3, A5, A6, A9, A10, A11, B3, B5.
+- Open owner questions: [docs/DECISIONS.md](docs/DECISIONS.md) (Q2 distribution, Q5 pipeline behaviour, Q8 to Q11). Q6 and Q7 are resolved.
 - Task 1 (credentials from env vars) is written in `bicc/provider.go` and `bicc/provider_test.go`; check `git log` for whether it is merged before assuming either way. It is not in the v3.0.0 tag.
 
 ## 4. Authority and risk lanes
