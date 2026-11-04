@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -326,6 +327,9 @@ func TestIsJobNotFound(t *testing.T) {
 		{"400 near miss: Invalid Job state", 400, `{"code":"Bad Request","message":"Invalid Job state"}`, false},
 		{"400 near miss: Invalid Data Store Id provided", 400, `{"code":"Bad Request","message":"Invalid Data Store Id provided"}`, false},
 		{"400 JSON with extra fields", 400, `{"code":"Bad Request","message":"Invalid Job Id provided","extra":1}`, true},
+		// encoding/json matches keys case-insensitively; values stay exact; BICC was only
+		// observed sending lower-case keys (A6). Pinned so a change of decoder is noticed.
+		{"400 upper-case keys match (encoding/json is case-insensitive for keys)", 400, `{"CODE":"Bad Request","Message":"Invalid Job Id provided"}`, true},
 		{"400 empty body", 400, ``, false},
 		{"400 non-JSON body", 400, `Invalid Job Id provided`, false},
 		{"400 non-JSON html", 400, `<html>Bad Request</html>`, false},
@@ -481,6 +485,25 @@ func TestDeleteJob(t *testing.T) {
 		}
 		assertNotTyped(t, err, 500)
 	})
+
+	// Only 200 and 204 are success (A5 observed 200). 201 and 202 are errors: a BICC 202
+	// ("accepted, still deleting") would NOT mean the job is gone, and would need a decision
+	// (poll? treat as success?) before this is relaxed.
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted} {
+		status := status
+		t.Run(fmt.Sprintf("%d is an untyped error, not success", status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			err := newTestClient(t, srv).DeleteJob(context.Background(), 7)
+			if err == nil {
+				t.Fatalf("expected error for %d on DELETE", status)
+			}
+			assertNotTyped(t, err, status)
+		})
+	}
 
 	t.Run("non-200/204 returns error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -266,6 +266,47 @@ func TestReadDeleteRejectUnusableStateIDs(t *testing.T) {
 	}
 }
 
+// Pins the DECISIONS Q11 claim "the next run recovers" at mock level only (not observed on
+// BICC): a Delete that fails on a client timeout keeps state; a following Read that gets the
+// live "Invalid Job Id" 400 (the job did finish deleting on BICC) removes state without error.
+// A GET landing while BICC is still deleting, or two overlapping DELETEs, are unknown (C2).
+func TestDeleteTimeoutThenReadRecovers(t *testing.T) {
+	release := make(chan struct{})
+	var phase int32 // 0: BICC is slow to DELETE; 1: delete has finished, job is gone
+	r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
+		if atomic.LoadInt32(&phase) == 0 {
+			<-release
+			return
+		}
+		if req.Method == http.MethodGet {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(liveMissingJobBody))
+			return
+		}
+		t.Errorf("unexpected %s in phase 1", req.Method)
+	})
+	t.Cleanup(func() { close(release) })
+	r.client.HTTPClient.Timeout = 50 * time.Millisecond
+
+	state := existingState(t)
+	dresp := runDelete(t, r, state)
+	if !dresp.Diagnostics.HasError() {
+		t.Fatal("Delete must return an error when the client times out")
+	}
+	if dresp.State.Raw.IsNull() {
+		t.Fatal("state must be kept when Delete fails")
+	}
+
+	atomic.StoreInt32(&phase, 1)
+	rresp := runRead(t, r, dresp.State)
+	if rresp.Diagnostics.HasError() {
+		t.Fatalf("Read of a now-missing job must not error: %v", rresp.Diagnostics)
+	}
+	if !rresp.State.Raw.IsNull() {
+		t.Fatal("Read with the live 400 must remove state")
+	}
+}
+
 func TestDeleteIdempotencyAndErrors(t *testing.T) {
 	// OBSERVED 2026-11-04 (A5): DELETE of an already-missing id returns HTTP 200, so a
 	// repeated or racing delete succeeds through the ordinary success path.
