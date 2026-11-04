@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -66,10 +67,15 @@ func resourceSchema(t *testing.T) *resource.SchemaResponse {
 // existingState builds a state holding a job with the given ID, name and description.
 func existingState(t *testing.T) tfsdk.State {
 	t.Helper()
+	return stateWithID(t, testJobID)
+}
+
+func stateWithID(t *testing.T, id string) tfsdk.State {
+	t.Helper()
 	sr := resourceSchema(t)
 	state := tfsdk.State{Schema: sr.Schema}
 	model := biccJobModel{
-		ID:          types.StringValue(testJobID),
+		ID:          types.StringValue(id),
 		Name:        types.StringValue("SIT_TEST_JOB"),
 		Description: types.StringValue("old description"),
 		DataStores:  types.SetValueMust(types.ObjectType{AttrTypes: dataStoreAttrTypes}, []attr.Value{}),
@@ -212,6 +218,51 @@ func TestReadRemovesStateOnlyOnNotFound(t *testing.T) {
 			t.Fatalf("description = %q (present=%v), want %q", desc.ValueString(), ok, "new description")
 		}
 	})
+}
+
+// An id in state that is not a positive int64 must never reach the API and never drop
+// state or delete anything: Read and Delete return an error, keep state and make ZERO
+// HTTP calls. (If the mock were reached it would answer the live "job missing" 400 for
+// GET and 200 for DELETE, which is exactly what would wrongly drop state or "succeed".)
+func TestReadDeleteRejectUnusableStateIDs(t *testing.T) {
+	ids := []string{"", "abc", "99999999999999999999", " 4242", "0", "-5"}
+	handler := func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(liveMissingJobBody))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+	for _, id := range ids {
+		id := id
+		t.Run("Read id="+strconv.Quote(id), func(t *testing.T) {
+			r, calls := newMockedResource(t, handler)
+			resp := runRead(t, r, stateWithID(t, id))
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if resp.State.Raw.IsNull() {
+				t.Fatal("state was removed for an unusable id")
+			}
+			if got := atomic.LoadInt32(calls); got != 0 {
+				t.Errorf("expected 0 HTTP calls, got %d", got)
+			}
+		})
+		t.Run("Delete id="+strconv.Quote(id), func(t *testing.T) {
+			r, calls := newMockedResource(t, handler)
+			resp := runDelete(t, r, stateWithID(t, id))
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected an error diagnostic")
+			}
+			if resp.State.Raw.IsNull() {
+				t.Fatal("state was removed for an unusable id")
+			}
+			if got := atomic.LoadInt32(calls); got != 0 {
+				t.Errorf("expected 0 HTTP calls, got %d", got)
+			}
+		})
+	}
 }
 
 func TestDeleteIsIdempotentOnNotFound(t *testing.T) {

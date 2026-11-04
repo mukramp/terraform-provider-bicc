@@ -310,6 +310,24 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
+// parseStateJobID turns the id stored in state into a job id for Read and Delete. It
+// accepts only a positive base-10 int64. Anything else (empty, non-numeric, overflow,
+// leading space, 0, negative) adds an error diagnostic and returns false BEFORE any HTTP
+// call: BICC answers 400 "Invalid Job Id provided" for such ids (A6), which Read would
+// read as "job gone" and drop from state, so they must never reach the API (KI-5).
+func parseStateJobID(raw string, diags *diag.Diagnostics) (int64, bool) {
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		diags.AddError("Invalid job ID", fmt.Sprintf("State holds job id %q, which is not a number; state left unchanged: %s", raw, err))
+		return 0, false
+	}
+	if id <= 0 {
+		diags.AddError("Invalid job ID", fmt.Sprintf("State holds job id %q, which is not a positive number; state left unchanged.", raw))
+		return 0, false
+	}
+	return id, true
+}
+
 func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state biccJobModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -317,9 +335,8 @@ func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	jobID, err := strconv.ParseInt(state.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID", err.Error())
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
@@ -432,9 +449,8 @@ func (r *biccJobResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	jobID, err := strconv.ParseInt(state.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID", err.Error())
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
