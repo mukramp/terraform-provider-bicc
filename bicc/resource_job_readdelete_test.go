@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -291,31 +290,33 @@ func TestDeleteIsIdempotentOnNotFound(t *testing.T) {
 	}
 }
 
-// Create: after a successful PUT the job exists on BICC. If the re-read then fails, the id
-// must already be in state, so Terraform tracks the resource (tainted, because Create
-// returns an error) instead of forgetting it and re-PUTting blindly on the next apply.
-func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
-	newReq := func(t *testing.T) (resource.CreateRequest, *resource.CreateResponse) {
-		t.Helper()
-		sr := resourceSchema(t)
-		plan := tfsdk.Plan{Schema: sr.Schema}
-		model := biccJobModel{
-			ID:          types.StringUnknown(),
-			Name:        types.StringValue("SIT_TEST_JOB"),
-			Description: types.StringValue("desc"),
-			DataStores:  types.SetValueMust(types.ObjectType{AttrTypes: dataStoreAttrTypes}, []attr.Value{}),
-		}
-		if diags := plan.Set(context.Background(), model); diags.HasError() {
-			t.Fatalf("building plan: %v", diags)
-		}
-		// The framework hands Create a null state of the schema's type.
-		resp := &resource.CreateResponse{State: tfsdk.State{
-			Schema: sr.Schema,
-			Raw:    tftypes.NewValue(sr.Schema.Type().TerraformType(context.Background()), nil),
-		}}
-		return resource.CreateRequest{Plan: plan}, resp
+// Create: PUT upserts by name. If the PUT succeeded and the re-read fails, Create must NOT
+// write any state: state with an id would be saved tainted and the next apply would plan
+// DELETE (about 150s on SIT) and create, which would delete a real job if the name matched
+// one created outside Terraform. With no state the next apply re-sends the same PUT, which
+// converges (A1 unverified for rename). The job is an orphan until then; the error says so.
+func newCreateReq(t *testing.T) (resource.CreateRequest, *resource.CreateResponse) {
+	t.Helper()
+	sr := resourceSchema(t)
+	plan := tfsdk.Plan{Schema: sr.Schema}
+	model := biccJobModel{
+		ID:          types.StringUnknown(),
+		Name:        types.StringValue("SIT_TEST_JOB"),
+		Description: types.StringValue("desc"),
+		DataStores:  types.SetValueMust(types.ObjectType{AttrTypes: dataStoreAttrTypes}, []attr.Value{}),
 	}
+	if diags := plan.Set(context.Background(), model); diags.HasError() {
+		t.Fatalf("building plan: %v", diags)
+	}
+	// The framework hands Create a null state of the schema's type.
+	resp := &resource.CreateResponse{State: tfsdk.State{
+		Schema: sr.Schema,
+		Raw:    tftypes.NewValue(sr.Schema.Type().TerraformType(context.Background()), nil),
+	}}
+	return resource.CreateRequest{Plan: plan}, resp
+}
 
+func TestCreateLeavesStateEmptyWhenReReadFails(t *testing.T) {
 	failures := []struct {
 		name   string
 		status int
@@ -327,7 +328,7 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 	}
 	for _, tc := range failures {
 		tc := tc
-		t.Run(tc.name+" keeps the id in state and reports an error", func(t *testing.T) {
+		t.Run(tc.name+" leaves state empty and reports the orphan", func(t *testing.T) {
 			var puts int32
 			r, _ := newMockedResource(t, func(w http.ResponseWriter, req *http.Request) {
 				switch req.Method {
@@ -339,21 +340,23 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 					_, _ = w.Write([]byte(tc.body))
 				}
 			})
-			req, resp := newReq(t)
+			req, resp := newCreateReq(t)
 			r.Create(context.Background(), req, resp)
 
 			if !resp.Diagnostics.HasError() {
 				t.Fatal("expected an error diagnostic")
 			}
-			if resp.State.Raw.IsNull() {
-				t.Fatal("state is empty after a successful PUT: the job would exist on BICC untracked")
+			if !resp.State.Raw.IsNull() {
+				t.Fatal("state must stay EMPTY when the re-read fails: tainted state would make the next apply delete the job")
 			}
-			var id types.String
-			if diags := resp.State.GetAttribute(context.Background(), path.Root("id"), &id); diags.HasError() {
-				t.Fatalf("reading id: %v", diags)
+			var msg string
+			for _, d := range resp.Diagnostics.Errors() {
+				msg += d.Summary() + " " + d.Detail()
 			}
-			if id.ValueString() != "555" {
-				t.Errorf("state id = %q, want %q", id.ValueString(), "555")
+			for _, want := range []string{"555", "exists on BICC", "upserts by name", "re-sends the same job", "no data loss"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error message lacks %q: %s", want, msg)
+				}
 			}
 			if got := atomic.LoadInt32(&puts); got != 1 {
 				t.Errorf("expected exactly 1 PUT, got %d", got)
@@ -365,7 +368,7 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 		r, _ := newMockedResource(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		})
-		req, resp := newReq(t)
+		req, resp := newCreateReq(t)
 		r.Create(context.Background(), req, resp)
 		if !resp.Diagnostics.HasError() {
 			t.Fatal("expected an error diagnostic")
@@ -383,7 +386,7 @@ func TestCreateRecordsIDWhenReReadFails(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"name":"SIT_TEST_JOB","description":"desc","dataStores":[],"schedules":null}`))
 		})
-		req, resp := newReq(t)
+		req, resp := newCreateReq(t)
 		r.Create(context.Background(), req, resp)
 		if resp.Diagnostics.HasError() {
 			t.Fatalf("unexpected error: %v", resp.Diagnostics)
