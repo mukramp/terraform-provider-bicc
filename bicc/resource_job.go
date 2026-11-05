@@ -2,6 +2,7 @@ package bicc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -265,18 +266,45 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 
 	jobResp, err := r.client.CreateOrUpdateJob(ctx, job)
 	if err != nil {
+		if errors.Is(err, client.ErrUnusableResponse) {
+			// 2xx but no usable id: the job may exist on BICC under the configured name.
+			resp.Diagnostics.AddError("Error creating job",
+				fmt.Sprintf("BICC accepted the PUT (HTTP 2xx) but returned no usable job id, so the job may "+
+					"exist on BICC under the configured name %q. Nothing was saved to state. "+
+					"Check BICC for a job with that name before re-running apply. Detail: %s", job.Name, err))
+			return
+		}
 		resp.Diagnostics.AddError("Error creating job", err.Error())
 		return
 	}
 
+	// A PUT answer with an id that is not a positive number cannot be read back (BICC
+	// answers 400 "Invalid Job Id" for it, A6) and cannot be tracked: fail before any GET
+	// and write no state.
+	if jobResp.ID <= 0 {
+		resp.Diagnostics.AddError("Error creating job",
+			fmt.Sprintf("The PUT returned HTTP success but BICC returned an unusable id %d for the job, so "+
+				"the job may exist on BICC under the configured name %q. "+
+				"Nothing was saved to state and the job was not read back.", jobResp.ID, job.Name))
+		return
+	}
+
 	plan.ID = types.StringValue(strconv.FormatInt(jobResp.ID, 10))
+
+	// Do NOT write any state before the re-read below succeeds. If state held the id and
+	// Create then returned an error, Terraform would save it tainted and the next apply
+	// would plan DELETE (about 150s on SIT) followed by create. PUT upserts by name, so if
+	// the name matched a job created outside Terraform, that DELETE would remove a real
+	// job after a transient re-read failure. With no state, the next apply re-sends the
+	// same PUT, which converges without a delete (A1 unverified for rename). The cost is
+	// an orphan job on BICC until that next apply (KI-5); the error below says so.
 
 	// Re-read from the API so all Computed fields (is_effective_date_disabled,
 	// initial_extract_date, columns, etc.) are populated in state. Without this,
 	// Optional+Computed fields not set in config remain unknown after Create.
 	refreshed, err := r.client.GetJob(ctx, jobResp.ID)
 	if err != nil {
-		resp.Diagnostics.AddError("Error reading job after create", err.Error())
+		resp.Diagnostics.AddError("Error reading job after create", orphanReadBackDetail(jobResp.ID, err))
 		return
 	}
 
@@ -287,16 +315,68 @@ func (r *biccJobResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	newDataStores, diags := r.buildDataStoresFromAPI(ctx, refreshed.DataStores, oldByKey)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
+	if diags.HasError() {
+		resp.Diagnostics.AddError("Error processing job after create", orphanProcessingDetail(jobResp.ID, diags))
 		return
 	}
+	resp.Diagnostics.Append(diags...)
 
 	plan.Name = types.StringValue(refreshed.Name)
 	plan.Description = types.StringValue(refreshed.Description)
 	plan.DataStores = newDataStores
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+}
+
+// parseStateJobID turns the id stored in state into a job id for Read and Delete. It
+// accepts only a positive base-10 int64. Anything else (empty, non-numeric, overflow,
+// leading space, 0, negative) adds an error diagnostic and returns false BEFORE any HTTP
+// call: BICC answers 400 "Invalid Job Id provided" for such ids (A6), which Read would
+// read as "job gone" and drop from state, so they must never reach the API (KI-5).
+func parseStateJobID(raw string, diags *diag.Diagnostics) (int64, bool) {
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		diags.AddError("Invalid job ID", fmt.Sprintf("State holds job id %q, which is not a number; state left unchanged: %s", raw, err))
+		return 0, false
+	}
+	if id <= 0 {
+		diags.AddError("Invalid job ID", fmt.Sprintf("State holds job id %q, which is not a positive number; state left unchanged.", raw))
+		return 0, false
+	}
+	return id, true
+}
+
+// orphanRetryAdvice is the shared tail of every Create error raised after BICC accepted the
+// PUT: nothing is in state, the job may be on BICC. The evidence for "the job exists" is only
+// a 2xx from the PUT, and same-name re-PUT convergence is unverified (ASSUMPTIONS A1), so the
+// text says "as far as reported" and tells the operator to check BICC first.
+func orphanRetryAdvice(jobID int64) string {
+	return fmt.Sprintf("No state was saved. Re-running apply sends the same job again; PUT upserts by name "+
+		"as far as reported (A1, unverified), so this should converge, but check BICC for job %d "+
+		"or the job name first.", jobID)
+}
+
+// orphanReadBackDetail words the Create error when the PUT was acknowledged but the GET
+// that follows failed. A typed not-found (the live 400, A6) is reported as "unknown (or not
+// visible)", never as verified absence or presence.
+func orphanReadBackDetail(jobID int64, err error) string {
+	if errors.Is(err, client.ErrNotFound) {
+		return fmt.Sprintf("BICC acknowledged the PUT with job id %d, but BICC answered that job %d is unknown "+
+			"(or not visible); it may not have been created.\n\n%s", jobID, jobID, orphanRetryAdvice(jobID))
+	}
+	return fmt.Sprintf("BICC acknowledged the PUT with job id %d, but reading the job back failed: %s\n\n%s",
+		jobID, err, orphanRetryAdvice(jobID))
+}
+
+// orphanProcessingDetail words the Create error when the PUT and the GET both succeeded
+// but turning the API answer into state failed. Same orphan caveat as orphanReadBackDetail.
+func orphanProcessingDetail(jobID int64, diags diag.Diagnostics) string {
+	var parts []string
+	for _, d := range diags.Errors() {
+		parts = append(parts, d.Summary()+": "+d.Detail())
+	}
+	return fmt.Sprintf("BICC acknowledged the PUT with job id %d and the job was read back, but its data could "+
+		"not be converted to state: %s\n\n%s", jobID, strings.Join(parts, "; "), orphanRetryAdvice(jobID))
 }
 
 func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -306,15 +386,26 @@ func (r *biccJobResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	jobID, err := strconv.ParseInt(state.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID", err.Error())
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
 	job, err := r.client.GetJob(ctx, jobID)
 	if err != nil {
-		resp.State.RemoveResource(ctx)
+		// Drop the resource from state ONLY when the API says the job does not exist.
+		// Any other failure (5xx, 401/403, network, bad JSON) must not be read as
+		// "deleted": removing state would make Terraform plan to recreate the job
+		// (KI-5). Leave state untouched and surface the error.
+		// "Does not exist" is HTTP 400 {"code":"Bad Request","message":"Invalid Job Id
+		// provided"}, OBSERVED on SIT 2026-11-04 (ASSUMPTIONS A6); a bare 404 is NOT that.
+		// See client.isJobNotFound. OPEN RISK: the same 400 may also be returned for a job
+		// the account cannot see (permissions); unchecked.
+		if client.IsNotFound(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		resp.Diagnostics.AddError("Error reading job", fmt.Sprintf("Could not read job %d; state left unchanged: %s", jobID, err))
 		return
 	}
 
@@ -355,6 +446,13 @@ func (r *biccJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 	plan.ID = state.ID
 
+	// Validate the state id BEFORE any HTTP call (the PUT upserts by name and cannot be
+	// undone, and a bad id would only fail after it): same rule as Read and Delete (KI-5).
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
+		return
+	}
+
 	job, diags := r.buildJobFromModel(ctx, plan)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
@@ -368,12 +466,6 @@ func (r *biccJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	// Re-read from the API so state reflects server-normalized values.
-	jobID, err := strconv.ParseInt(plan.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID after update", err.Error())
-		return
-	}
-
 	refreshed, err := r.client.GetJob(ctx, jobID)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading job after update", err.Error())
@@ -409,12 +501,16 @@ func (r *biccJobResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	jobID, err := strconv.ParseInt(state.ID.ValueString(), 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid job ID", err.Error())
+	jobID, ok := parseStateJobID(state.ID.ValueString(), &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
+	// Delete is idempotent because BICC answers HTTP 200 for a repeat DELETE of a missing
+	// id (OBSERVED 2026-11-04, ASSUMPTIONS A5). There is no not-found exemption: any
+	// non-2xx (including 400 and 404) is an error, because reporting success while the job
+	// may still exist on BICC would drop it from Terraform. No retries (ASSUMPTIONS C2).
+	// Deletes take about 2.5 minutes on SIT (A10), against the 300s client timeout.
 	if err := r.client.DeleteJob(ctx, jobID); err != nil {
 		resp.Diagnostics.AddError("Error deleting job", err.Error())
 	}

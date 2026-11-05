@@ -138,13 +138,21 @@ func (c *Client) CreateOrUpdateJob(ctx context.Context, job *Job) (*JobResponse,
 
 	var jobResp JobResponse
 	if err := json.Unmarshal(bodyBytes, &jobResp); err != nil {
-		return nil, fmt.Errorf("error unmarshaling response: %v", err)
+		// 2xx was received: the job may exist even though its id is unusable.
+		return nil, &unusableResponseError{err: fmt.Errorf("error unmarshaling response: %v", err)}
 	}
 
 	return &jobResp, nil
 }
 
 // GetJob retrieves a BICC job by ID.
+//
+// It returns a *NotFoundError (see IsNotFound) only when isJobNotFound says the
+// response means "this job does not exist": HTTP 400 with the JSON body
+// {"code":"Bad Request","message":"Invalid Job Id provided"} (OBSERVED 2026-11-04 on
+// SIT, ASSUMPTIONS A6). Every other failure (network error, any 404, other 400s,
+// 401/403, 5xx, unparseable body) is returned as an ordinary error, so callers can tell a
+// missing job from a transient failure.
 func (c *Client) GetJob(ctx context.Context, jobID int64) (*Job, error) {
 	path := fmt.Sprintf("/biacm/rest/meta/jobs/%d", jobID)
 
@@ -159,8 +167,8 @@ func (c *Client) GetJob(ctx context.Context, jobID int64) (*Job, error) {
 		return nil, fmt.Errorf("error reading response body: %v", err)
 	}
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("job not found")
+	if isJobNotFound(resp.StatusCode, bodyBytes) {
+		return nil, &NotFoundError{JobID: jobID, Method: http.MethodGet, StatusCode: resp.StatusCode}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -204,7 +212,16 @@ func (c *Client) GetDataStoreColumns(ctx context.Context, dataStoreKey string) (
 	return dataStore.Columns, nil
 }
 
-// DeleteJob deletes a BICC job (note: BICC API may not support DELETE).
+// DeleteJob deletes a BICC job. DELETE works (OBSERVED 2026-11-04 on SIT, ASSUMPTIONS A5):
+// an existing job is removed (about 2.5 minutes, close to the 300s client timeout), and a
+// repeat DELETE of the now-missing id returns HTTP 200, so idempotency comes from BICC
+// itself, not from not-found handling.
+//
+// Any status other than 200 or 204 is an ordinary error, including 400 (even with the GET
+// not-found body) and 404. There is deliberately NO not-found mapping here: the 400
+// "Invalid Job Id" shape was observed for GET only, and treating a failed DELETE as
+// success would report a delete that did not happen while the job stays on BICC.
+// No retries (ASSUMPTIONS C2).
 func (c *Client) DeleteJob(ctx context.Context, jobID int64) error {
 	path := fmt.Sprintf("/biacm/rest/meta/jobs/%d", jobID)
 
@@ -214,10 +231,10 @@ func (c *Client) DeleteJob(ctx context.Context, jobID int64) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+		return nil
 	}
 
-	return nil
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
 }
