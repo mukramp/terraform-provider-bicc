@@ -9,17 +9,17 @@ Status values: `Decided` (recorded in the old plan as resolved by the owner; the
 ## Decisions
 
 ### DR-1. Removing a job deletes it in every environment
-- Status: Decided (as recorded in the old plan).
+- Status: Decided (as recorded in the old plan). Confirmed by the owner 2026-11-03 (Q6).
 - Removing a job from the consumer repo deletes the BICC job in all environments (sit, stg, uat, prd), including its last-extract-date state. There is no `skip_delete` in the first version. `prevent_destroy` is not used either (see [CONSUMER-MIGRATION.md](CONSUMER-MIGRATION.md)).
 - Consequence: plan review is the only safeguard, so Delete must be correct (task 5 in [PLAN.md](PLAN.md)) and the first plans per environment must be read carefully. A rename is delete plus create (task 3).
 - Assumptions underneath: DELETE works on the BICC API (A5, unknown); a delete removes the last-extract-date state (reported, not checked).
 
 ### DR-2. Backfill is not managed by Terraform
-- Status: Decided (as recorded in the old plan). Matches commit `262107e` (v3.0.0): the BICC API does not support setting `lastExtractDate` through PUT (commit message, reported).
+- Status: Decided (as recorded in the old plan). Confirmed by the owner 2026-11-03 (Q6). Matches commit `262107e` (v3.0.0): the BICC API does not support setting `lastExtractDate` through PUT (commit message, reported).
 - Backfills are done via the BICC UI. `bicc_job_backfill` stays removed and no replacement is planned. Docs that suggest otherwise are tracked in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) (KI-10).
 
 ### DR-3. Scope is `bicc_job` only
-- Status: Decided (as recorded in the old plan).
+- Status: Decided (as recorded in the old plan). Confirmed by the owner 2026-11-03 (Q6).
 - No `bicc_datastore` data source unless column metadata is needed outside `bicc_job` (task 9).
 
 ### DR-4. No local access to the consumer's Terraform GCS backend
@@ -41,6 +41,17 @@ Status values: `Decided` (recorded in the old plan as resolved by the owner; the
 - Status: Agent decided (green lane, reversible), announced here.
 - `docs/` is also the Terraform Registry's documentation directory (`index.md`, `resources/`, ...). The project docs (`PLAN.md`, `KNOWN-ISSUES.md`, `ASSUMPTIONS.md`, `DECISIONS.md`, `CONSUMER-MIGRATION.md`) sit next to `index.md` as flat files, as the request asked. Risk: the registry or `tfplugindocs validate` may reject or publish them (ASSUMPTIONS R4, unknown). Fallback if so: move them to `project/` or `docs/project/` excluded from validation, and update the links in `AGENTS.md` and `README.md`.
 
+### DR-8. SIT boundary: only the test job in `sit_testing/` may be touched
+- Status: Owner statement 2026-11-03 ("it is imperative that no other jobs or datastores in SIT are touched during development or testing"). The operational rules below are the agent's proposal and wait for the owner's confirmation (see the open items in the 2026-11-03 session report).
+- The only BICC objects development and testing may create, update or delete are the ones defined in `../sit_testing/main.tf`: job `SIT_TEST_JOB` with data stores `FscmTopModelAM.FinFunCurrenciesAM.CurrencyPVO` and `FscmTopModelAM.FinFunTerritoriesAM.CountryPVO` (as read from the file; the owner's "two data stores" is read to mean these two inside this one job).
+- Proposed rules:
+  1. Live runs go through `sit_testing` (`make plan|apply|destroy`) only. Run `make plan` first and read it; if it lists any resource other than `bicc_job.sit_test_job`, stop.
+  2. PUT upserts by job name, so a wrong name overwrites a real job. Any test job name must start with `SIT_TEST_` and must be shown by a read-only list to not exist before it is created.
+  3. Raw API calls (`curl`) that write, and every DELETE, use only a job ID taken from the `sit_testing` state or from a create response of a test job. Never an ID found by browsing the job list.
+  4. Unit and plugin-framework tests use `httptest` mocks. Any acceptance test against sit refuses to run unless every job name it uses starts with `SIT_TEST_`.
+  5. Import tests import `SIT_TEST_JOB` only.
+- Not verified: which instance `.env` points to (agents cannot read it); that `SIT_TEST_JOB` does not collide with an existing real job.
+
 ## Open questions (owner-only, batched)
 
 ### Q2. How is the provider distributed to the Terraform pipeline? OPEN
@@ -55,16 +66,15 @@ Options from the old plan:
 
 ### Q5. Terraform pipeline behaviour (full plan and apply of every job instead of changed files only, plan on PRs, worker reachability). OPEN
 - Checked on sit as group C in [ASSUMPTIONS.md](ASSUMPTIONS.md); the questions C4 and C5 need an owner decision after C1 and C2.
-
-### Q6. Confirm the recorded decisions DR-1 to DR-3
-- The migration copied them from the old plan without change. Confirm they are current, in particular DR-1, because it is a red-lane consequence (deletion in prd).
-- Default if unanswered: they stay as recorded.
+- Update 2026-11-03: owner: **stays open until more assumptions are tested.** Not asked again before the group A and B checks have results.
 
 ### Q7. Commit and release of the pending task 1 change
 - The task 1 edits (`bicc/provider.go`, `bicc/provider_test.go`, plus doc hunks) were made earlier and are uncommitted. This migration does not commit them without a statement from the owner that they are finished. See `AGENTS.md`, authority.
+- Update 2026-11-03: owner: **the change still has to be verified through `../sit_testing`** (its Makefile loads `.env` for the Terraform commands) before it is committed. That is check B5 in [ASSUMPTIONS.md](ASSUMPTIONS.md). Release stays red lane and owner-only.
 
 ## Resolved
 
 - Q1. Does a Go provider prototype exist? Yes: this provider.
 - Q3. Should removing a job file delete the BICC job? Yes, see DR-1.
 - Q4. Do you want `bicc_job_backfill`? No, see DR-2.
+- Q6. Confirm the recorded decisions DR-1 to DR-3. Confirmed by the owner 2026-11-03.

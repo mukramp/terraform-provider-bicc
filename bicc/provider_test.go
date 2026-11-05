@@ -41,6 +41,26 @@ func TestProvider(t *testing.T) {
 	}
 }
 
+// Terraform core rejects configs that omit Required attributes before
+// Configure runs, so the env var fallback only works if these are Optional.
+func TestProviderSchema_CredentialsOptional(t *testing.T) {
+	schemaResp := &provider.SchemaResponse{}
+	New().Schema(context.Background(), provider.SchemaRequest{}, schemaResp)
+
+	for _, name := range []string{"host", "username", "password"} {
+		attr, ok := schemaResp.Schema.Attributes[name]
+		if !ok {
+			t.Fatalf("attribute %q missing from provider schema", name)
+		}
+		if attr.IsRequired() {
+			t.Errorf("attribute %q must not be Required, otherwise the env var fallback never runs", name)
+		}
+		if !attr.IsOptional() {
+			t.Errorf("attribute %q must be Optional", name)
+		}
+	}
+}
+
 // -------------------------------------------------------------------------
 // Provider.Configure helpers
 // -------------------------------------------------------------------------
